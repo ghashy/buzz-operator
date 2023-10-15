@@ -1,3 +1,5 @@
+Planned stuff:
+
 1. Service registration: Allow users to register their background services with your tool. This could involve providing a name, description, and configuration details for each service.
 
 2. Start and stop services: Implement functionality to start and stop registered services. Users should be able to initiate the execution of a service or terminate its execution.
