@@ -1,0 +1,14 @@
+[Unit]
+AssertPathExists=/usr/bin/sman
+
+[Service]
+# Customise later
+User=ghashy
+WorkingDirectory=~
+ExecStart=/usr/bin/sman
+Restart=always
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

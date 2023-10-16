@@ -5,7 +5,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Automate deployment, rolling updating, health checking, etc."
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[[bin]]
+name = "sman"
+path = "src/main.rs"
 
 [dependencies]
 # Add support later
@@ -19,3 +21,16 @@ opt-level = 3
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[package.metadata.deb]
+depends = "$auto, systemd"
+extended-description = "Here will be extended description."
+section = "admin"
+priority = "optional"
+maintainer-scripts = "debian/scripts"
+systemd-units = { enable = true, unit-scripts = "debian/unit-scripts", unit-name = "sman" }
+assets = [
+    ["target/release/sman", "usr/bin/sman", "755"],
+]
+
+
