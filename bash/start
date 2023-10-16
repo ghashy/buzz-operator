@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+
+SCRIPT_NAME="start_script"
+
+function parse_yaml {
+   local prefix=$2
+   local s='[[:space:]]*' w='[a-zA-Z0-9_]*' fs=$(echo @|tr @ '\034')
+   sed -ne "s|^\($s\):|\1|" \
+        -e "s|^\($s\)\($w\)$s:$s[\"']\(.*\)[\"']$s\$|\1$fs\2$fs\3|p" \
+        -e "s|^\($s\)\($w\)$s:$s\(.*\)$s\$|\1$fs\2$fs\3|p"  $1 |
+   awk -F$fs '{
+      indent = length($1)/2;
+      vname[indent] = $2;
+      for (i in vname) {if (i > indent) {delete vname[i]}}
+      if (length($3) > 0) {
+         vn=""; for (i=0; i<indent; i++) {vn=(vn)(vname[i])("_")}
+         printf("%s%s%s=\"%s\"\n", "'$prefix'",vn, $2, $3);
+      }
+   }'
+}
+
+function write_conf {
+   echo "Creating new configuration for in Supervisor for $exec_stable"
+   logdir=$(realpath $logdir_app)
+   
+   sudo echo \
+"[program:$app_name]
+command=$(realpath $exec_stable)
+directory=$(dirname $(realpath $exec_stable))
+process_name=$app_name
+user=ghashy
+autostart=true
+autorestart=unexpected
+startsecs=3
+startretries=2
+numprocs=$instances_count
+stopsignal=TERM
+stdout_logfile=$logdir/${app_name}_instance_%(process_num).out.log
+stderr_logfile=$logdir/${app_name}_instance_%(process_num).err.log
+exitcodes=0" > "/etc/supervisor/conf.d/${app_name}.conf"
+}
+
+function prefix {
+   echo "$(date) - $SCRIPT_NAME:"
+}
+
+# Check conf.yaml
+if [ -f "./conf.yaml" ]; then
+   echo "$(prefix) Found conf.yaml"
+else
+   echo "$(prefix) Not found conf.yaml, exit"
+   exit 1
+fi
+
+# Set exec_new, exec_stable, roll_time, instances_count
+eval $(parse_yaml conf.yaml)
+
+# Check that all variables are set
+if [[ -n $app_name && -n $exec_new && -n $exec_stable && -n $roll_time && -n $instances_count && -n $logdir_app && -n $logdir_scripts ]]; then
+   echo "$(prefix) All variables set" 
+else
+   echo "$(prefix) Not all variables set, exit"
+   exit 1
+fi
+
+# Check that exec_stable available
+if [[ -f $exec_stable ]] then
+   echo "$(prefix) Stable exec exists"
+else
+   echo "$(prefix) No $exec_stable, exit"
+   exit 1
+fi
+
+# Check if there exec_new
+if [[ -f $exec_new ]] then
+   read -p "$(prefix) Found $exec_new, start server with this version (y/n) -> "
+   if [[ $REPLY == "y" ]] then
+      echo "$(prefix) Deleting stable exec.."
+      rm $exec_stable
+      echo "$(prefix) Rename new exec to stable.."
+      mv $exec_new $exec_stable
+      echo "$(prefix) Done"
+   fi
+fi
+
+# Write conf to /etc/supervisor/conf.d/${app_name}.conf
+write_conf
+
+exit
+
