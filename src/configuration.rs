@@ -26,12 +26,14 @@ pub struct ServiceConfig {
     pub instances_count: u16,
     pub stable_exec_name: String,
     pub new_exec_name: String,
-    pub app_dir: PathBuf,
     pub connect_addr: ConnectAddr,
     pub roll_time_sec: Option<u32>,
     pub start_args: Option<Vec<String>>,
     pub update_script: Option<PathBuf>,
+    pub app_dir: PathBuf,
     pub log_dir: Option<PathBuf>,
+    #[serde(default = "default_fail_limit")]
+    pub fails_limit: u16,
 }
 
 impl ServiceConfig {
@@ -39,6 +41,21 @@ impl ServiceConfig {
         self.log_dir
             .clone()
             .unwrap_or_else(|| self.app_dir.join("logs"))
+    }
+    pub fn create_test_config() -> ServiceConfig {
+        ServiceConfig {
+            name: "test".to_string(),
+            instances_count: 5,
+            stable_exec_name: "test_stable".to_string(),
+            new_exec_name: "test_new".to_string(),
+            connect_addr: ConnectAddr::Unix("test_app/sockets".into()),
+            roll_time_sec: Some(10),
+            start_args: None,
+            update_script: None,
+            app_dir: "test_app".into(),
+            log_dir: None,
+            fails_limit: 5,
+        }
     }
 }
 
@@ -56,4 +73,8 @@ impl Configuration {
 
         settings.try_deserialize()
     }
+}
+
+fn default_fail_limit() -> u16 {
+    5
 }

@@ -1,7 +1,5 @@
-use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
@@ -113,30 +111,26 @@ impl Service {
 }
 
 pub struct ServiceBunch {
-    name: String,
+    config: ServiceConfig,
     services: Vec<mpsc::Sender<()>>,
 }
 
 impl ServiceBunch {
-    pub fn new(name: &str) -> ServiceBunch {
+    pub fn new(config: ServiceConfig) -> ServiceBunch {
         ServiceBunch {
-            name: name.to_string(),
+            config,
             services: Vec::new(),
         }
     }
 
-    pub fn spawn(
-        &mut self,
-        conf: configuration::ServiceConfig,
-    ) -> std::io::Result<()> {
+    pub fn spawn(&mut self) -> std::io::Result<()> {
         let addresses = self.figure_out_bunch_of_addresses(
-            conf.connect_addr.clone(),
-            conf.instances_count,
+            self.config.connect_addr.clone(),
+            self.config.instances_count,
         )?;
-
         for address in addresses.iter() {
             let (tx, rx) = tokio::sync::mpsc::channel(100);
-            let mut service = Service::new(&conf, address, rx).unwrap();
+            let mut service = Service::new(&self.config, address, rx).unwrap();
             self.services.push(tx);
 
             // Start service executing
@@ -170,7 +164,8 @@ impl ServiceBunch {
     ) -> std::io::Result<Vec<ConnectAddr>> {
         match start_from {
             ConnectAddr::Unix(path) => {
-                let sockets = get_sockets_paths(&self.name, count, &path)?;
+                let sockets =
+                    get_sockets_paths(&self.config.name, count, &path)?;
 
                 Ok(sockets
                     .into_iter()
@@ -347,7 +342,7 @@ mod service_bunch_tests {
     fn test_figure_out_bunch_of_addresses_unix() {
         let start_from = ConnectAddr::Unix(PathBuf::from("test_app/sockets"));
         let bunch = ServiceBunch {
-            name: "test".to_string(),
+            config: ServiceConfig::create_test_config(),
             services: Vec::new(),
         };
         let count = 3;
@@ -373,7 +368,7 @@ mod service_bunch_tests {
             port: 8000,
         };
         let bunch = ServiceBunch {
-            name: "test".to_string(),
+            config: ServiceConfig::create_test_config(),
             services: Vec::new(),
         };
         let count = 3;

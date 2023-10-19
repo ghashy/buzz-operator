@@ -16,6 +16,9 @@ services:
     connect_addr:
       addr: "127.0.0.1"
       port: 80
+    # Allowed count of unexpected fails per minute for single process.
+    # Set to 5 by default.
+    fails_limit: 5
     
     
     app_dir: "/Users/ghashy/Dev/Rust/crates/sman/test_app/exec_dir"
