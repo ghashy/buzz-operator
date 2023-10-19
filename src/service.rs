@@ -1,19 +1,23 @@
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
 
 use crate::configuration::{self, ServiceConfig};
 use crate::connect_addr::ConnectAddr;
 
 struct Service {
     process: Child,
+    term_rx: mpsc::Receiver<()>,
 }
 
 impl Service {
     fn new(
         config: &ServiceConfig,
         addr: &ConnectAddr,
+        term_rx: mpsc::Receiver<()>,
     ) -> Result<Service, std::io::Error> {
         // Make sure log directory exists
         if !config.get_log_dir().exists() {
@@ -36,10 +40,10 @@ impl Service {
         match addr {
             ConnectAddr::Unix(sock) => {
                 process =
-                    command.args(&["--unix-socket".into(), sock.to_owned()]);
+                    process.args(&["--unix-socket".into(), sock.to_owned()]);
             }
             ConnectAddr::Tcp { addr, port } => {
-                process = command.args(&[
+                process = process.args(&[
                     "--ip",
                     &addr.to_string(),
                     "--port",
@@ -55,26 +59,62 @@ impl Service {
 
         let process = process.spawn()?;
 
-        Ok(Service { process })
+        Ok(Service { process, term_rx })
     }
 
-    async fn terminate(&mut self) -> std::io::Result<()> {
-        self.process.kill().await
+    fn terminate(self) -> std::io::Result<()> {
+        let id = self.process.id().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "a")
+        })?;
+
+        unsafe {
+            if libc::kill(id as i32, libc::SIGTERM) == 0 {
+                return Ok(());
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Kill failed",
+                ));
+            }
+        }
     }
 
-    async fn get_output(&self) -> Option<&tokio::process::ChildStdout> {
-        self.process.stdout.as_ref()
-    }
+    // async fn get_output(&self) -> Option<&tokio::process::ChildStdout> {
+    //     self.process.stdout.as_ref()
+    // }
 
-    async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.process.wait().await
+    /// This function will wait until child process exits itself,
+    /// or the signal will be received over the `self.term_rx`.
+    async fn wait(mut self) -> std::io::Result<()> {
+        use std::io::{Error, ErrorKind};
+
+        tokio::select! {
+            stat = self.process.wait() => {
+                // Handle child process exit
+                match stat {
+                    Ok(status) => {
+                        if status.success() {
+                            return Ok(())
+                        } else {
+                            return Err(Error::from(ErrorKind::Other))
+                        }
+                    },
+                    Err(err) => {
+                        return Err(err);
+                    },
+                }
+            }
+            _ = self.term_rx.recv() => {
+                // Handle rolling update request
+                self.terminate()
+            }
+        }
     }
 }
 
 pub struct ServiceBunch {
     name: String,
-    services: Vec<Service>,
-    task_set: tokio::task::JoinSet<std::io::Result<std::process::ExitStatus>>,
+    services: Vec<mpsc::Sender<()>>,
 }
 
 impl ServiceBunch {
@@ -82,7 +122,6 @@ impl ServiceBunch {
         ServiceBunch {
             name: name.to_string(),
             services: Vec::new(),
-            task_set: tokio::task::JoinSet::new(),
         }
     }
 
@@ -96,18 +135,32 @@ impl ServiceBunch {
         )?;
 
         for address in addresses.iter() {
-            self.services.push(Service::new(&conf, address)?);
+            let (tx, rx) = tokio::sync::mpsc::channel(100);
+            let mut service = Service::new(&conf, address, rx).unwrap();
+            self.services.push(tx);
+
+            // Start service executing
+            tokio::spawn(async move {
+                // TODO: What should I do with this?
+                let service_exited = service.wait().await;
+            });
         }
 
         Ok(())
     }
 
-    async fn watch_child_processes(&mut self) {
-        // Spawn a task for each child process to continuously wait
-        for s in self.services.iter_mut() {
-            self.task_set.spawn(s.wait());
-        }
-    }
+    // pub async fn start(&mut self) {
+    //     let mut rolling_update_rx = self.rolling_update_tx.clone();
+    //     for service in self.services.iter_mut() {
+    //         tokio::spawn(async move {
+    //             service.watch(rolling_update_rx).await;
+    //         });
+    //     }
+    // }
+
+    // pub fn request_rolling_update(&self) {
+    //     let _ = self.rolling_update_tx.try_send(());
+    // }
 
     /// Get bunch of available network addresses
     fn figure_out_bunch_of_addresses(
@@ -147,6 +200,15 @@ impl ServiceBunch {
     }
 }
 
+impl Drop for ServiceBunch {
+    fn drop(&mut self) {
+        // Iterate over the services and send a signal to stop each one
+        for service in self.services.iter() {
+            // Ignore any send errors, as the receiver may have already been dropped
+            let _ = service.send(());
+        }
+    }
+}
 // pub struct MainStack(Vec<ServiceBunch>);
 
 // impl MainStack {
@@ -156,7 +218,7 @@ impl ServiceBunch {
 //         Ok(s) => Some(s),
 //         Err(e) => None,
 //     };
-
+//
 //     if let Some(service) = service {
 //         // services.push(service);
 //         tokio::spawn(async move {
@@ -228,7 +290,57 @@ fn find_min_not_occupied(mut numbers: Vec<u16>) -> u16 {
 }
 
 #[cfg(test)]
-mod tests {
+mod service_tests {
+    use super::*;
+    use tokio_test::task::spawn;
+
+    #[tokio::test]
+    async fn wait_success() {
+        let (_, term_rx) = mpsc::channel(1);
+        let process = Command::new("echo")
+            .arg("Hello, World!")
+            .spawn()
+            .expect("Failed to spawn process");
+
+        let service = Service { process, term_rx };
+        let wait_handle = spawn(service.wait());
+        let result = wait_handle.await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn wait_failure() {
+        let (_term_tx, term_rx) = mpsc::channel(1);
+        let process = Command::new("false")
+            .spawn()
+            .expect("Failed to spawn process");
+
+        let service = Service { process, term_rx };
+        let wait_handle = spawn(service.wait());
+        let result = wait_handle.await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn terminate_success() {
+        let (_, term_rx) = mpsc::channel(1);
+        let process = Command::new("sleep")
+            .arg("1")
+            .spawn()
+            .expect("Failed to spawn process");
+
+        let service = Service { process, term_rx };
+
+        let result = service.terminate();
+
+        assert!(result.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod service_bunch_tests {
     use super::*;
 
     #[test]
