@@ -1,8 +1,0 @@
----
-instances_count: 10
-stable_exec: "stable_exec"
-new_exec: "exec"
-app_dir: "/Users/ghashy/Desktop/tests"
-# Seconds
-health_check: 5
-...

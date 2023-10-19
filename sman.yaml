@@ -1,0 +1,23 @@
+---
+services:
+  - service:
+    name: "hello"
+    instances_count: 1
+    stable_exec_name: "hello"
+    new_exec_name: "new_hello"
+    # Network address:
+    # connect_addr:
+    #   unix: "/path/to/folder/where/to/store/socketfiles"
+    # connect_addr:
+    #   addr: "127.0.0.1"
+    #   port: 80
+    # If there more than 1 instance, all other will be next addresses in order,
+    # or, if unavailable, other random addresses.
+    connect_addr:
+      addr: "127.0.0.1"
+      port: 80
+    
+    
+    app_dir: "/Users/ghashy/Dev/Rust/crates/sman/test_app/exec_dir"
+    log_dir: "/Users/ghashy/Dev/Rust/crates/sman/test_app/exec_dir"
+...

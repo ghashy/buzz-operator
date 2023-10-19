@@ -10,11 +10,19 @@ name = "sman"
 path = "src/main.rs"
 
 [dependencies]
-# Add support later
-# yaml-rust = "0.4.5"
+tokio = { version = "1.33.0", features = [
+    "macros",
+    "rt-multi-thread",
+    "process",
+    "io-util",
+    "sync",
+] }
+tracing = "0.1.39"
+tracing-subscriber = "0.3.17"
 config = "0.13.3"
 notify = "6.1.1"
 serde = { version = "1.0.186", features = ["derive"] }
+chrono = "0.4.26"
 
 [profile.dev]
 opt-level = 3
@@ -29,8 +37,4 @@ section = "admin"
 priority = "optional"
 maintainer-scripts = "debian/scripts"
 systemd-units = { enable = true, unit-scripts = "debian/unit-scripts", unit-name = "sman" }
-assets = [
-    ["target/release/sman", "usr/bin/sman", "755"],
-]
-
-
+assets = [["target/release/sman", "usr/bin/sman", "755"]]
