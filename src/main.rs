@@ -1,13 +1,13 @@
-use std::path::Path;
-use std::path::PathBuf;
-use std::process::Command;
-use std::process::Stdio;
+use std::net::Ipv4Addr;
+use std::time::Duration;
 
 use notify::RecursiveMode;
 use notify::Watcher;
+use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 
 use sman::configuration;
-use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
+use sman::service::service_bunch::ServiceBunch;
+use sman::service::Service;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
@@ -16,50 +16,15 @@ async fn main() {
     let services_configuration =
         configuration::Configuration::load_configuration().unwrap();
 
-    // let mut services = Vec::new();
+    // let mut bunch =
+    //     ServiceBunch::new(services_configuration.services[0].clone());
 
-    // for service in services.iter_mut() {
-    //     service.terminate().await;
-    // }
+    // let term = tokio::spawn(async {
+    //     tokio::time::sleep(Duration::from_secs(5)).await;
+    //     return;
+    // });
 
-    // let conf1 = &conf.services[1];
-
-    // let (tx, rx) = std::sync::mpsc::channel();
-
-    // Automatically select the best implementation for your platform.
-    // let mut watcher = notify::recommended_watcher(move |res| match res {
-    //     Ok(event) => tx.send(event).unwrap(),
-    //     Err(e) => println!("watch error: {:?}", e),
-    // })
-    // .unwrap();
-
-    // Add a path to be watched. All files and directories at that path and
-    // below will be monitored for changes.
-    // watcher
-    //     .watch(conf.app_dir.as_path(), RecursiveMode::Recursive)
-    //     .unwrap();
-
-    // Start an infinite loop to receive and handle the events
-    // loop {
-    //     match rx.recv() {
-    //         Ok(event) => println!("Event: {:?}", event),
-    //         Err(e) => println!("Error: {:?}", e),
-    //     }
-    // }
-
-    // std::thread::sleep(std::time::Duration::from_secs(100));
-
-    // println!("Terminating all processes...");
-    // for process in pids.iter_mut() {
-    //     match process.kill() {
-    //         Ok(_) => {
-    //             println!("Succesfully terminated process {}", process.id())
-    //         }
-    //         Err(e) => {
-    //             eprintln!("Failed to terminate process {}: {}", process.id(), e)
-    //         }
-    //     }
-    // }
+    // let (a, b) = tokio::join!(term, bunch.run_and_wait());
 }
 
 fn init_tracing_subscriber() {
@@ -89,3 +54,47 @@ fn init_tracing_subscriber() {
     tracing::subscriber::set_global_default(subscriber)
         .expect("Failed to set up tracing");
 }
+// let mut services = Vec::new();
+
+// for service in services.iter_mut() {
+//     service.terminate().await;
+// }
+
+// let conf1 = &conf.services[1];
+
+// let (tx, rx) = std::sync::mpsc::channel();
+
+// Automatically select the best implementation for your platform.
+// let mut watcher = notify::recommended_watcher(move |res| match res {
+//     Ok(event) => tx.send(event).unwrap(),
+//     Err(e) => println!("watch error: {:?}", e),
+// })
+// .unwrap();
+
+// Add a path to be watched. All files and directories at that path and
+// below will be monitored for changes.
+// watcher
+//     .watch(conf.app_dir.as_path(), RecursiveMode::Recursive)
+//     .unwrap();
+
+// Start an infinite loop to receive and handle the events
+// loop {
+//     match rx.recv() {
+//         Ok(event) => println!("Event: {:?}", event),
+//         Err(e) => println!("Error: {:?}", e),
+//     }
+// }
+
+// std::thread::sleep(std::time::Duration::from_secs(100));
+
+// println!("Terminating all processes...");
+// for process in pids.iter_mut() {
+//     match process.kill() {
+//         Ok(_) => {
+//             println!("Succesfully terminated process {}", process.id())
+//         }
+//         Err(e) => {
+//             eprintln!("Failed to terminate process {}: {}", process.id(), e)
+//         }
+//     }
+// }

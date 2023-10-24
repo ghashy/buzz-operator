@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 pub mod service_bunch;
 pub mod service_unit;
+mod unit_connection;
 
 // /// Service can exit with just Succes, or with a variety of Errors
 // type Result<E> = std::result::Result<(), E>;

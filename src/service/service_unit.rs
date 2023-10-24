@@ -14,7 +14,7 @@ pub enum ServiceUnitError {
     ExitError { id: ProcessID, err: String },
     TerminationFailed(ProcessID),
     ServiceNotStarted(std::io::Error),
-    MpscError(tokio::sync::mpsc::error::SendError<TerminateSignal>),
+    MpscError(tokio::sync::mpsc::error::SendError<TermSignal>),
 }
 
 impl std::error::Error for ServiceUnitError {}
@@ -38,7 +38,7 @@ impl std::fmt::Display for ServiceUnitError {
     }
 }
 
-pub enum TerminateSignal {
+pub enum TermSignal {
     Terminate,
 }
 
@@ -46,7 +46,7 @@ pub struct ServiceUnit {
     command: Command,
     child: Option<tokio::process::Child>,
     id: Option<ProcessID>,
-    term_rx: mpsc::Receiver<TerminateSignal>,
+    term_rx: mpsc::Receiver<TermSignal>,
 }
 
 impl ServiceUnit {
@@ -56,7 +56,7 @@ impl ServiceUnit {
     pub fn new(
         config: &ServiceConfig,
         address: &ConnectAddr,
-        term_rx: mpsc::Receiver<TerminateSignal>,
+        term_rx: mpsc::Receiver<TermSignal>,
     ) -> std::result::Result<ServiceUnit, std::io::Error> {
         // Make sure log directory exists
         if !config.get_log_dir().exists() {
@@ -220,7 +220,7 @@ mod tests {
         assert!(run.is_ok());
 
         let result = tokio::select! {
-            result = term_tx.send(TerminateSignal::Terminate) => {
+            result = term_tx.send(TermSignal::Terminate) => {
                 result
                       .map_err(|e| ServiceUnitError::MpscError(e))
             }

@@ -2,7 +2,7 @@
 services:
   - service:
     name: "hello"
-    instances_count: 1
+    instances_count: 3
     stable_exec_name: "hello"
     new_exec_name: "new_hello"
     # Network address:

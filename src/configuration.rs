@@ -20,7 +20,7 @@ impl AppConfig {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct ServiceConfig {
     pub name: String,
     pub instances_count: u16,

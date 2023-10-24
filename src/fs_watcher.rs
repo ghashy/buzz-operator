@@ -9,20 +9,22 @@ use notify::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
-struct FileSystemWatcher {
+pub struct FileSystemWatcher {
     watcher: RecommendedWatcher,
-    receiver: mpsc::Receiver<Result<notify::Event>>,
+    receiver: std::sync::Arc<tokio::sync::Notify>,
+    // receiver: mpsc::Receiver<Result<notify::Event>>,
 }
 
 impl FileSystemWatcher {
     fn new(path: &Path) -> FileSystemWatcher {
-        let (tx, rx) = mpsc::channel(100);
+        // let (tx, rx) = mpsc::channel(100);
+        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let notify2 = notify.clone();
 
         let mut watcher = notify::recommended_watcher(move |res| {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                tx.send(res).await.unwrap();
-            });
+            notify2.notify_one();
+            // tx.blocking_send(res)
+            //     .expect("Failed to send filesystem notification");
         })
         .unwrap();
 
@@ -32,30 +34,31 @@ impl FileSystemWatcher {
         // Create an instance of the custom Future
         FileSystemWatcher {
             watcher,
-            receiver: rx,
+            receiver: notify,
+            // receiver: rx,
         }
     }
 }
 
-impl Future for FileSystemWatcher {
-    type Output = ();
+// impl Future for FileSystemWatcher {
+//     type Output = ();
 
-    fn poll(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Self::Output> {
-        // Poll the receiver for the next event
-        match Pin::new(&mut self.receiver).poll_recv(cx) {
-            Poll::Ready(Some(Ok(event))) => {
-                println!("Event: {:?}", event);
-                Poll::Pending
-            }
-            Poll::Ready(Some(Err(e))) => {
-                println!("Error: {:?}", e);
-                Poll::Pending
-            }
-            Poll::Ready(None) => Poll::Ready(()), // Receiver closed, future completed
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
+//     fn poll(
+//         mut self: Pin<&mut Self>,
+//         cx: &mut Context<'_>,
+//     ) -> Poll<Self::Output> {
+//         // Poll the receiver for the next event
+//         match self.receiver.poll_recv(cx) {
+//             Poll::Ready(Some(Ok(event))) => {
+//                 println!("Event: {:?}", event);
+//                 Poll::Pending
+//             }
+//             Poll::Ready(Some(Err(e))) => {
+//                 println!("Error: {:?}", e);
+//                 Poll::Pending
+//             }
+//             Poll::Ready(None) => Poll::Ready(()), // Receiver closed, future completed
+//             Poll::Pending => Poll::Pending,
+//         }
+//     }
+// }
