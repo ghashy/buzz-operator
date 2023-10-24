@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -11,7 +11,7 @@ use crate::configuration::ServiceConfig;
 use crate::connect_addr::ConnectAddr;
 
 use super::service_unit::{
-    ProcessID, ServiceUnit, ServiceUnitError, TerminateSignal,
+    ProcessID, ServiceUnit, ServiceUnitError, TermSignal,
 };
 use super::Service;
 
@@ -32,19 +32,45 @@ impl std::fmt::Display for ServiceBunchError {
     }
 }
 
+#[derive(Clone, Default)]
+enum UnitMode {
+    #[default]
+    Keeping,
+    Stopping,
+}
+
 #[derive(Clone)]
 struct UnitConnection {
-    termination_sender: mpsc::Sender<TerminateSignal>,
+    termination_sender: mpsc::Sender<TermSignal>,
     pid: ProcessID,
+    /// In this field we store current amount of failures
+    failure_count: Arc<AtomicU16>,
+    mode: UnitMode,
 }
 
 impl UnitConnection {
-    fn new(sender: mpsc::Sender<TerminateSignal>, pid: ProcessID) -> Self {
+    fn new(sender: mpsc::Sender<TermSignal>, pid: ProcessID) -> Self {
         UnitConnection {
             termination_sender: sender,
             pid,
+            failure_count: Arc::new(AtomicU16::new(0)),
+            mode: UnitMode::default()
         }
     }
+    fn failure_add(&self) -> u16 {
+        self.failure_count.fetch_add(1, Ordering::Relaxed)
+    }
+    fn failures_reset(&self) {
+        self.failure_count.store(0, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone, Default)]
+enum BunchMode{
+    #[default]
+    Running,
+    Updating,
+    Stopping,
 }
 
 pub struct ServiceBunch {
@@ -54,8 +80,6 @@ pub struct ServiceBunch {
     /// In our case, we have `Vec` with connections to our processes.
     unit_connections: Vec<UnitConnection>,
     join_set: JoinSet<Result<(), ServiceUnitError>>,
-    /// In this field we store current amount of failures
-    failure_count: Arc<AtomicU16>,
     /// We need to somehow send messages to `failure_checker` tokio task,
     /// and for this purpose we use `Sender<()>` again :)
     failure_check_signal_tx: mpsc::Sender<ProcessID>,
@@ -70,48 +94,9 @@ impl ServiceBunch {
             config,
             unit_connections: Vec::new(),
             join_set: JoinSet::new(),
-            failure_count: Arc::new(AtomicU16::new(0)),
             failure_check_signal_tx: signal_tx,
             failure_check_signal_rx: Some(signal_rx),
         }
-    }
-
-    /// This checker do not need to count for failures, we implemented this
-    /// logic in `run_and_wait` function
-    fn start_failure_checker(&mut self) {
-        // Start a separate Tokio task to check for failures
-        let failure_counter = self.failure_count.clone();
-        let mut signal_rx = self.failure_check_signal_rx.take().unwrap();
-        let limit = self.config.fails_limit;
-        let services_conn = self.unit_connections.clone();
-        tokio::spawn(async move {
-            let mut last_check_time = Instant::now();
-            // Wait until failure signal
-            while let Some(_) = signal_rx.recv().await {
-                // Calculate the failures within the last minute
-                let failures = failure_counter.load(Ordering::Relaxed);
-
-                if last_check_time.elapsed() > Duration::from_secs(60) {
-                    // Reset the failure count
-                    last_check_time = Instant::now();
-                    // Reset timer
-                    failure_counter.store(1, Ordering::Relaxed);
-                    continue;
-                }
-
-                if failures > limit {
-                    // TODO: implement failures handle
-                    // Terminate all services
-                    for service in services_conn.iter() {
-                        service
-                            .termination_sender
-                            .send(TerminateSignal::Terminate)
-                            .await;
-                    }
-                    return; // Exit the function
-                }
-            }
-        });
     }
 
     /// Get bunch of available network addresses
@@ -152,6 +137,52 @@ impl ServiceBunch {
             }
         }
     }
+
+    // TODO: re-implement this function to work together with `wait_on` function
+    /// This checker do not need to count for failures, we implemented this
+    /// logic in `run_and_wait` function
+    fn start_failure_checker(&mut self) {
+        // Start a separate Tokio task to check for failures
+        // let failure_counter = self.failure_count.clone();
+        let mut signal_rx = self.failure_check_signal_rx.take().unwrap();
+        let limit = self.config.fails_limit;
+        let services_conn = self.unit_connections.clone();
+
+        tokio::spawn(async move {
+            let mut last_check_time = Instant::now();
+            // Wait until failure signal
+            while let Some(pid) = signal_rx.recv().await {
+                let Some(failures) =
+                    services_conn.iter().find(|&a| a.pid == pid)
+                else {
+                    continue;
+                };
+
+                // Calculate the failures within the last minute
+                let failures_count = failures.failure_add();
+
+                if last_check_time.elapsed() > Duration::from_secs(60) {
+                    // Reset the failure count
+                    last_check_time = Instant::now();
+                    // Reset timer
+                    failures.failures_reset();
+                    continue;
+                }
+
+                if failures_count > limit {
+                    // TODO: implement failures handle
+                    // Terminate all services
+                    for service in services_conn.iter() {
+                        service
+                            .termination_sender
+                            .send(TermSignal::Terminate)
+                            .await;
+                    }
+                    return; // Exit the function
+                }
+            }
+        });
+    }
 }
 
 #[async_trait]
@@ -159,10 +190,33 @@ impl Service<(), ServiceBunchError> for ServiceBunch {
     type Output = ();
 
     async fn wait_on(&mut self) -> Result<(), ServiceBunchError> {
+        use ServiceUnitError::*;
+
+        // Wait on child processes execution
         match self.join_set.join_next().await {
-            Some(_) => todo!(),
+            // Some task has finished successfully
+            Some(Ok(Ok(()))) => todo!(),
+            // Some task has finished with error
+            Some(Ok(Err(serv_err))) => {
+                tracing::error!("ServiceUnit exited with error: {}", serv_err);
+                match serv_err {
+                    // TODO: match service mode => do failure checker if needed, locally, and then make a decision
+                    ExitError { id, err } => todo!(),
+                    // Trace it, and do nothing
+                    TerminationFailed(_) => todo!(),
+                    // Restart, count failures
+                    ServiceNotStarted(_) => todo!(),
+                    // Restart, count failures
+                    MpscError(_) => todo!(),
+                }
+                self.failure_check_signal_tx.send(serv_err.).await;
+            }
+            // Some join error
+            Some(Err(join_err)) => todo!(),
+            // All tasks are finished
             None => todo!(),
         }
+        Ok(())
     }
 
     fn run(&mut self) -> Result<Self::Output, ServiceBunchError> {
@@ -192,9 +246,6 @@ impl Service<(), ServiceBunchError> for ServiceBunch {
 
             self.unit_connections
                 .push(UnitConnection::new(term_tx, pid));
-
-            let failure_counter = self.failure_count.clone();
-            let signal_counter = self.failure_check_signal_tx.clone();
         }
 
         Ok(())
@@ -203,46 +254,11 @@ impl Service<(), ServiceBunchError> for ServiceBunch {
     fn try_terminate(&mut self) -> Result<(), ServiceBunchError> {
         self.unit_connections.iter().for_each(|service| {
             // Ignore any send errors, as the receiver may have already been dropped
-            let _ = service.termination_sender.send(TerminateSignal::Terminate);
+            let _ = service.termination_sender.send(TermSignal::Terminate);
         });
         Ok(())
     }
 }
-
-// pub async fn start(&mut self) {
-//     let mut rolling_update_rx = self.rolling_update_tx.clone();
-//     for service in self.services.iter_mut() {
-//         tokio::spawn(async move {
-//             service.watch(rolling_update_rx).await;
-//         });
-//     }
-// }
-
-// pub fn request_rolling_update(&self) {
-//     let _ = self.rolling_update_tx.try_send(());
-// }
-// pub struct MainStack(Vec<ServiceBunch>);
-
-// impl MainStack {
-// fn spawn(conf: configuration::Configuration) {
-// for service_config in conf.services.iter() {
-//     let mut service = match ServiceUnit::new(service_config) {
-//         Ok(s) => Some(s),
-//         Err(e) => None,
-//     };
-//
-//     if let Some(service) = service {
-//         // services.push(service);
-//         tokio::spawn(async move {
-//             match service.get_output().await {
-//                 Some(stdout) => {}
-//                 None => todo!(),
-//             }
-//         });
-//     }
-// }
-// }
-// }
 
 /// Check if a specific TCP port is available on a given IP address
 fn is_port_available(addr: std::net::IpAddr, port: u16) -> bool {
@@ -312,7 +328,6 @@ mod tests {
         let bunch = ServiceBunch {
             config: config.clone(),
             unit_connections: Vec::new(),
-            failure_count: Arc::new(AtomicU16::new(0)),
             failure_check_signal_tx: signal_tx,
             failure_check_signal_rx: Some(signal_rx),
             join_set: JoinSet::new(),
@@ -344,7 +359,6 @@ mod tests {
         let bunch = ServiceBunch {
             config: config.clone(),
             unit_connections: Vec::new(),
-            failure_count: Arc::new(AtomicU16::new(0)),
             failure_check_signal_tx: signal_tx,
             failure_check_signal_rx: Some(signal_rx),
             join_set: JoinSet::new(),
