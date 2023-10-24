@@ -2,14 +2,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use notify::event::CreateKind;
+use notify::{Event, EventKind};
+use tokio::select;
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::configuration::ServiceConfig;
 use crate::connect_addr::ConnectAddr;
+use crate::fs_watcher::FileSystemWatcher;
 
-use super::service_unit::{
-    ProcessID, ServiceUnit, ServiceUnitError, TermSignal,
-};
+use super::service_unit::{ProcessID, ServiceUnit, ServiceUnitError};
 use super::unit_connection::UnitConnection;
 use super::Service;
 
@@ -54,15 +57,20 @@ pub struct ServiceBunch {
     unit_connections: Vec<UnitConnection>,
     join_set: JoinSet<Result<(), ServiceUnitError>>,
     bunch_mode: BunchMode,
+    fs_watcher: FileSystemWatcher,
 }
 
 impl ServiceBunch {
-    pub fn new(config: ServiceConfig) -> ServiceBunch {
+    pub fn new(
+        config: ServiceConfig,
+        fs_watcher: FileSystemWatcher,
+    ) -> ServiceBunch {
         ServiceBunch {
             config,
             unit_connections: Vec::new(),
             join_set: JoinSet::new(),
             bunch_mode: Default::default(),
+            fs_watcher,
         }
     }
 
@@ -196,22 +204,45 @@ impl Service<(), ServiceBunchError> for ServiceBunch {
     async fn wait_on(&mut self) -> Result<(), ServiceBunchError> {
         // Wait on child processes execution
         loop {
-            match self.join_set.join_next().await {
-                Some(Ok(Ok(()))) => {
-                    tracing::info!("Some unit service exited wit 0 code")
+            select! {
+                join = self.join_set.join_next() => {
+                    // Some service finished
+                    match join {
+                        Some(Ok(Ok(()))) => {
+                            tracing::info!("Some unit service exited wit 0 code")
+                        }
+                        Some(Ok(Err(serv_err))) => {
+                            tracing::error!(
+                                "ServiceUnit exited with error: {}",
+                                serv_err
+                            );
+                            self.handle_service_unit_error(serv_err);
+                        }
+                        // Some join error
+                        Some(Err(e)) => return Err(ServiceBunchError::JoinError(e)),
+                        // All tasks are finished
+                        None => return Ok(()),
+                    }
                 }
-                // Some task has finished with error
-                Some(Ok(Err(serv_err))) => {
-                    tracing::error!(
-                        "ServiceUnit exited with error: {}",
-                        serv_err
-                    );
-                    self.handle_service_unit_error(serv_err);
+                notify = self.fs_watcher.receiver.recv() => {
+                    // Got filesystem notification
+                    match notify {
+                        Some(Ok(e)) => {
+                            tracing::info!(
+                                "Fs event: {:?}, kind: {:?}",
+                                e.paths,
+                                e.kind
+                            );
+                            match e.kind {
+                                EventKind::Create(_) => {
+                                    // TODO: handle binary uploading
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => todo!(),
+                    }
                 }
-                // Some join error
-                Some(Err(e)) => return Err(ServiceBunchError::JoinError(e)),
-                // All tasks are finished
-                None => return Ok(()),
             }
         }
     }
@@ -315,16 +346,20 @@ fn find_min_not_occupied(mut numbers: Vec<u16>) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use crate::fs_watcher::{self, FileSystemWatcher};
+
     use super::*;
 
     #[test]
     fn test_figure_out_bunch_of_addresses_unix() {
         let config = ServiceConfig::create_test_config();
+        let fs_watcher = FileSystemWatcher::new(&config.app_dir);
         let bunch = ServiceBunch {
             config: config.clone(),
             unit_connections: Vec::new(),
             join_set: JoinSet::new(),
             bunch_mode: BunchMode::default(),
+            fs_watcher,
         };
         let addresses = bunch.figure_out_bunch_of_addresses().unwrap();
 
@@ -349,11 +384,13 @@ mod tests {
             ..ServiceConfig::create_test_config()
         };
 
+        let fs_watcher = FileSystemWatcher::new(&config.app_dir);
         let bunch = ServiceBunch {
             config: config.clone(),
             unit_connections: Vec::new(),
             join_set: JoinSet::new(),
             bunch_mode: BunchMode::default(),
+            fs_watcher,
         };
         let addresses = bunch.figure_out_bunch_of_addresses().unwrap();
 
