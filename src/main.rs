@@ -1,13 +1,11 @@
-use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use notify::RecursiveMode;
-use notify::Watcher;
+use sman::fs_watcher::FileSystemWatcher;
+use sman::service::Service;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 
-use sman::configuration;
 use sman::service::service_bunch::ServiceBunch;
-use sman::service::Service;
+use sman::{configuration, fs_watcher};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
@@ -16,8 +14,15 @@ async fn main() {
     let services_configuration =
         configuration::Configuration::load_configuration().unwrap();
 
-    // let mut bunch =
-    //     ServiceBunch::new(services_configuration.services[0].clone());
+    let config = services_configuration.services[0].clone();
+    let fs_watcher = FileSystemWatcher::new(&config.app_dir);
+    let mut bunch = ServiceBunch::new(config, fs_watcher);
+
+    bunch.run().unwrap();
+    match bunch.wait_on().await {
+        Ok(_) => {}
+        Err(e) => println!("{:}", e),
+    }
 
     // let term = tokio::spawn(async {
     //     tokio::time::sleep(Duration::from_secs(5)).await;
