@@ -11,20 +11,16 @@ use tokio::sync::mpsc;
 
 pub struct FileSystemWatcher {
     watcher: RecommendedWatcher,
-    receiver: std::sync::Arc<tokio::sync::Notify>,
-    // receiver: mpsc::Receiver<Result<notify::Event>>,
+    pub receiver: mpsc::Receiver<Result<notify::Event>>,
 }
 
 impl FileSystemWatcher {
-    fn new(path: &Path) -> FileSystemWatcher {
-        // let (tx, rx) = mpsc::channel(100);
-        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
-        let notify2 = notify.clone();
+    pub fn new(path: &Path) -> FileSystemWatcher {
+        let (tx, rx) = mpsc::channel(100);
 
         let mut watcher = notify::recommended_watcher(move |res| {
-            notify2.notify_one();
-            // tx.blocking_send(res)
-            //     .expect("Failed to send filesystem notification");
+            tx.blocking_send(res)
+                .expect("Failed to send filesystem notification");
         })
         .unwrap();
 
@@ -34,8 +30,7 @@ impl FileSystemWatcher {
         // Create an instance of the custom Future
         FileSystemWatcher {
             watcher,
-            receiver: notify,
-            // receiver: rx,
+            receiver: rx,
         }
     }
 }
