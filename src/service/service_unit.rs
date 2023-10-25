@@ -140,25 +140,29 @@ impl Service<(), ServiceUnitError> for ServiceUnit {
 
     /// Try to terminate child process.
     fn terminate(&mut self) {
-        let id = self.id.unwrap();
+        let pid = self.id.unwrap() as i32;
 
         unsafe {
-            let result = libc::kill(id as i32, libc::SIGTERM);
+            if libc::kill(pid, 0) != 0 {
+                tracing::info!("No process with pid {}!", pid);
+                return;
+            }
+            let result = libc::kill(pid, libc::SIGTERM);
             if result == 0 {
-                tracing::info!("Process with pid {} terminated", id);
+                tracing::info!("Process with pid {} terminated", pid);
             } else {
                 tracing::error!(
                     "Process with pid {}, can't be terminated, error code: {}",
-                    id,
+                    pid,
                     result
                 );
-                let result = libc::kill(id as i32, libc::SIGKILL);
+                let result = libc::kill(pid, libc::SIGKILL);
                 if result == 0 {
-                    tracing::warn!("Process with pid {} killed", id);
+                    tracing::warn!("Process with pid {} killed", pid);
                 } else {
                     tracing::error!(
                         "Process with pid {}, can't be killed, error code: {}",
-                        id,
+                        pid,
                         result
                     );
                 }
