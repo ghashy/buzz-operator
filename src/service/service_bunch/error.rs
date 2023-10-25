@@ -4,6 +4,7 @@ pub enum ServiceBunchError {
     ControllerConnectionDropped,
     JoinError(tokio::task::JoinError),
     FailedToStart,
+    UpdateIterrupted,
 }
 
 impl std::error::Error for ServiceBunchError {}
@@ -22,6 +23,9 @@ impl std::fmt::Display for ServiceBunchError {
             }
             ServiceBunchError::ControllerConnectionDropped => {
                 f.write_str("Controller connection dropped")
+            }
+            ServiceBunchError::UpdateIterrupted => {
+                f.write_str("Update interrupted")
             }
         }
     }

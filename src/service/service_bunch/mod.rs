@@ -26,7 +26,8 @@ pub struct ServiceBunch {
     config: ServiceConfig,
     /// This bunch should have some connection to every process.
     /// In our case, we have `Vec` with connections to our processes.
-    unit_connections: Vec<UnitConnection>,
+    stable_connections: Vec<UnitConnection>,
+    new_connections: Vec<UnitConnection>,
     join_set: JoinSet<Result<(), ServiceUnitError>>,
     state: StateBox,
     controller_connection: Receiver<Message>,
@@ -39,54 +40,16 @@ impl ServiceBunch {
     ) -> ServiceBunch {
         ServiceBunch {
             config,
-            unit_connections: Vec::new(),
+            stable_connections: Vec::new(),
+            new_connections: Vec::new(),
             join_set: JoinSet::new(),
             state: StateBox::new(),
             controller_connection,
         }
     }
 
-    /// Get bunch of available network addresses
-    fn figure_out_bunch_of_addresses(
-        &self,
-    ) -> std::io::Result<Vec<ConnectAddr>> {
-        match &self.config.connect_addr {
-            ConnectAddr::Unix(path) => {
-                let sockets = get_sockets_paths(
-                    &self.config.name,
-                    self.config.instances_count,
-                    &path,
-                )?;
-
-                Ok(sockets
-                    .into_iter()
-                    .map(|path| ConnectAddr::Unix(path))
-                    .collect())
-            }
-            ConnectAddr::Tcp { addr, port } => {
-                let mut available_addresses = Vec::new();
-                let mut current_port = *port;
-
-                for _ in 0..self.config.instances_count {
-                    while !is_port_available(*addr, current_port) {
-                        current_port += 1;
-                    }
-
-                    available_addresses.push(ConnectAddr::Tcp {
-                        addr: addr.clone(),
-                        port: current_port,
-                    });
-
-                    current_port += 1;
-                }
-
-                Ok(available_addresses)
-            }
-        }
-    }
-
     fn is_stable(&self, pid: ProcessID) -> bool {
-        match self.unit_connections.iter().find(|a| a.get_pid() == pid) {
+        match self.stable_connections.iter().find(|a| a.get_pid() == pid) {
             Some(s) => s.is_stable(),
             None => false,
         }
@@ -97,7 +60,7 @@ impl ServiceBunch {
     fn is_limit_exceeded(&mut self, pid: ProcessID) -> bool {
         // Wait until failure signal
         let Some(connection) = self
-            .unit_connections
+            .stable_connections
             .iter_mut()
             .find(|a| a.get_pid() == pid)
         else {
@@ -146,7 +109,7 @@ impl ServiceBunch {
                     if self.is_stable(id) {
                         self.terminate();
                     } else {
-                        // stop updating
+                        self.state.update(state_machine::Event::UpdatingFailed);
                     }
                 }
             }
@@ -156,16 +119,72 @@ impl ServiceBunch {
 
     fn terminate(&mut self) {
         self.state.update(state_machine::Event::StopRequest);
-        self.unit_connections.iter().for_each(|service| {
+        self.stable_connections.iter().for_each(|service| {
             // Ignore any send errors, as the receiver may have already been dropped
             let _ = service.terminate();
         });
-        self.unit_connections.clear();
+        self.stable_connections.clear();
     }
 
-    fn start_update(&mut self) {
+    /*
+        HINT: What this fn does:
+        1. Run new async task which will spawn new process and exit after
+        timeout.
+        2. After timeout despawn one stable process.
+        3. Do all again until all processes will be replaced.
+    */
+    async fn start_update(&mut self) -> Result<(), ServiceBunchError> {
         self.state.update(state_machine::Event::UpdateRequest);
-        //
+
+        while !self.stable_connections.is_empty()
+            && self.state.is(state_machine::State::Updating)
+        {
+            let addressses = find_available_addresses(
+                &self.config.name,
+                &self.config.connect_addr,
+                1,
+            )
+            .map_err(|e| ServiceBunchError::FailedCreateAddress(e))?;
+            let address = &addressses[0];
+
+            let (term_tx, term_rx) = tokio::sync::mpsc::channel(100);
+            let mut service =
+                ServiceUnit::new(&self.config, address, term_rx).unwrap();
+
+            // Run service
+            let pid = match service.run() {
+                Ok(pid) => pid,
+                Err(e) => {
+                    tracing::error!("Failed to start ServiceUnit with: {}", e);
+                    self.state.update(state_machine::Event::StopRequest);
+                    let _ = self.terminate();
+                    return Err(ServiceBunchError::FailedToStart);
+                }
+            };
+
+            // Add to join
+            self.join_set.spawn(async move { service.wait_on().await });
+
+            self.new_connections.push(UnitConnection::new(
+                term_tx,
+                pid,
+                address.clone(),
+            ));
+
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+            let connection = self.stable_connections.pop().unwrap();
+            connection.terminate().await.unwrap();
+
+            if !self.state.is(state_machine::State::Updating) {
+                for process in self.new_connections.iter() {
+                    let _ = process.terminate().await;
+                }
+                self.new_connections.clear();
+                return Err(ServiceBunchError::UpdateIterrupted);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -200,7 +219,10 @@ impl Service<(), ServiceBunchError> for ServiceBunch {
                         Some(message) => {
                             match message {
                                 message::Message::StartUpdate => {
-                                    self.start_update();
+                                    match self.start_update().await {
+                                        Ok(_) => todo!(),
+                                        Err(e) => tracing::error!("{}", e),
+                                    }
                                 }
                                 message:: Message::Shutdown => {
                                     let _ = self.terminate();
@@ -220,9 +242,12 @@ impl Service<(), ServiceBunchError> for ServiceBunch {
 
     fn run(&mut self) -> Result<Self::Output, ServiceBunchError> {
         // Get all addresses for underlying services
-        let addresses = self
-            .figure_out_bunch_of_addresses()
-            .map_err(|e| ServiceBunchError::FailedCreateAddress(e))?;
+        let addresses = find_available_addresses(
+            &self.config.name,
+            &self.config.connect_addr,
+            self.config.instances_count,
+        )
+        .map_err(|e| ServiceBunchError::FailedCreateAddress(e))?;
 
         for address in addresses.iter() {
             // This is channel to communicate with each service process
@@ -243,11 +268,51 @@ impl Service<(), ServiceBunchError> for ServiceBunch {
             // Add to join
             self.join_set.spawn(async move { service.wait_on().await });
 
-            self.unit_connections
-                .push(UnitConnection::new(term_tx, pid));
+            self.stable_connections.push(UnitConnection::new(
+                term_tx,
+                pid,
+                address.clone(),
+            ));
         }
         self.state.update(state_machine::Event::ServicesEstablished);
         Ok(())
+    }
+}
+
+/// Get bunch of available network addresses
+fn find_available_addresses(
+    name: &str,
+    addr: &ConnectAddr,
+    count: u16,
+) -> std::io::Result<Vec<ConnectAddr>> {
+    match addr {
+        ConnectAddr::Unix(path) => {
+            let sockets = get_sockets_paths(name, count, &path)?;
+
+            Ok(sockets
+                .into_iter()
+                .map(|path| ConnectAddr::Unix(path))
+                .collect())
+        }
+        ConnectAddr::Tcp { addr, port } => {
+            let mut available_addresses = Vec::new();
+            let mut current_port = *port;
+
+            for _ in 0..count {
+                while !is_port_available(*addr, current_port) {
+                    current_port += 1;
+                }
+
+                available_addresses.push(ConnectAddr::Tcp {
+                    addr: addr.clone(),
+                    port: current_port,
+                });
+
+                current_port += 1;
+            }
+
+            Ok(available_addresses)
+        }
     }
 }
 
@@ -318,12 +383,18 @@ mod tests {
         let (_tx, controller_connection) = tokio::sync::mpsc::channel(100);
         let bunch = ServiceBunch {
             config: config.clone(),
-            unit_connections: Vec::new(),
+            stable_connections: Vec::new(),
             join_set: JoinSet::new(),
             state: StateBox::new(),
             controller_connection,
+            new_connections: Vec::new(),
         };
-        let addresses = bunch.figure_out_bunch_of_addresses().unwrap();
+        let addresses = find_available_addresses(
+            &bunch.config.name,
+            &bunch.config.connect_addr,
+            bunch.config.instances_count,
+        )
+        .unwrap();
 
         assert_eq!(addresses.len(), config.instances_count as usize);
         for address in addresses {
@@ -349,12 +420,18 @@ mod tests {
         let (_tx, controller_connection) = tokio::sync::mpsc::channel(100);
         let bunch = ServiceBunch {
             config: config.clone(),
-            unit_connections: Vec::new(),
+            stable_connections: Vec::new(),
             join_set: JoinSet::new(),
             state: StateBox::new(),
             controller_connection,
+            new_connections: Vec::new(),
         };
-        let addresses = bunch.figure_out_bunch_of_addresses().unwrap();
+        let addresses = find_available_addresses(
+            &bunch.config.name,
+            &bunch.config.connect_addr,
+            bunch.config.instances_count,
+        )
+        .unwrap();
 
         assert_eq!(addresses.len(), config.instances_count as usize);
         let mut port = 8000;

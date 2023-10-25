@@ -3,6 +3,8 @@ use tokio::{
     time::Instant,
 };
 
+use crate::connect_addr::{self, ConnectAddr};
+
 use super::service_unit::ProcessID;
 
 #[derive(Clone, Default)]
@@ -20,10 +22,15 @@ pub(super) struct UnitConnection {
     failure_count: u16,
     mode: UnitMode,
     is_stable: bool,
+    connect_addr: ConnectAddr,
 }
 
 impl UnitConnection {
-    pub(super) fn new(sender: mpsc::Sender<()>, pid: ProcessID) -> Self {
+    pub(super) fn new(
+        sender: mpsc::Sender<()>,
+        pid: ProcessID,
+        connect_addr: ConnectAddr,
+    ) -> Self {
         UnitConnection {
             termination_sender: sender,
             pid,
@@ -31,6 +38,7 @@ impl UnitConnection {
             mode: UnitMode::default(),
             last_check_time: Instant::now(),
             is_stable: true,
+            connect_addr,
         }
     }
     pub(super) fn failure_add(&mut self) -> u16 {
@@ -49,5 +57,8 @@ impl UnitConnection {
     }
     pub(crate) async fn terminate(&self) -> Result<(), SendError<()>> {
         self.termination_sender.blocking_send(())
+    }
+    pub(super) fn addr(&self) -> &ConnectAddr {
+        &self.connect_addr
     }
 }
