@@ -12,9 +12,8 @@ pub(super) type ProcessID = u32;
 #[derive(Debug)]
 pub enum ServiceUnitError {
     ExitError { id: ProcessID, err: String },
-    TerminationFailed(ProcessID),
     ServiceNotStarted(std::io::Error),
-    MpscError(tokio::sync::mpsc::error::SendError<TermSignal>),
+    MpscError,
 }
 
 impl std::error::Error for ServiceUnitError {}
@@ -25,28 +24,19 @@ impl std::fmt::Display for ServiceUnitError {
             ServiceUnitError::ExitError { id, err } => {
                 f.write_fmt(format_args!("{} pid: {} ", err, id))
             }
-            ServiceUnitError::TerminationFailed(id) => f.write_fmt(
-                format_args!("Failed to terminate service with pid {}", id),
-            ),
             ServiceUnitError::ServiceNotStarted(err) => {
                 f.write_fmt(format_args!("{}", err))
             }
-            ServiceUnitError::MpscError(err) => {
-                f.write_fmt(format_args!("{}", err))
-            }
+            ServiceUnitError::MpscError => f.write_str("Mpsc error"),
         }
     }
-}
-
-pub enum TermSignal {
-    Terminate,
 }
 
 pub struct ServiceUnit {
     command: Command,
     child: Option<tokio::process::Child>,
     id: Option<ProcessID>,
-    term_rx: mpsc::Receiver<TermSignal>,
+    term_rx: mpsc::Receiver<()>,
 }
 
 impl ServiceUnit {
@@ -56,7 +46,7 @@ impl ServiceUnit {
     pub fn new(
         config: &ServiceConfig,
         address: &ConnectAddr,
-        term_rx: mpsc::Receiver<TermSignal>,
+        term_rx: mpsc::Receiver<()>,
     ) -> std::result::Result<ServiceUnit, std::io::Error> {
         // Make sure log directory exists
         if !config.get_log_dir().exists() {
@@ -138,24 +128,40 @@ impl Service<(), ServiceUnitError> for ServiceUnit {
                     },
                 }
             }
-            // TODO: implement different terminations.
-            _ = self.term_rx.recv() => {
+            signal = self.term_rx.recv() => {
                 tracing::info!("Terminating service with id {}", self.id.unwrap());
                 // Handle rolling update request
-                self.try_terminate()
+                self.terminate();
+                Ok(())
+
             }
         }
     }
 
     /// Try to terminate child process.
-    fn try_terminate(&mut self) -> Result<(), ServiceUnitError> {
+    fn terminate(&mut self) {
         let id = self.id.unwrap();
 
         unsafe {
-            if libc::kill(id as i32, libc::SIGTERM) == 0 {
-                return Ok(());
+            let result = libc::kill(id as i32, libc::SIGTERM);
+            if result == 0 {
+                tracing::info!("Process with pid {} terminated", id);
             } else {
-                return Err(ServiceUnitError::TerminationFailed(id));
+                tracing::error!(
+                    "Process with pid {}, can't be terminated, error code: {}",
+                    id,
+                    result
+                );
+                let result = libc::kill(id as i32, libc::SIGKILL);
+                if result == 0 {
+                    tracing::warn!("Process with pid {} killed", id);
+                } else {
+                    tracing::error!(
+                        "Process with pid {}, can't be killed, error code: {}",
+                        id,
+                        result
+                    );
+                }
             }
         }
     }
@@ -218,17 +224,19 @@ mod tests {
 
         let run = service.run();
         assert!(run.is_ok());
+        let pid = run.unwrap();
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
 
         let result = tokio::select! {
-            result = term_tx.send(TermSignal::Terminate) => {
-                result
-                      .map_err(|e| ServiceUnitError::MpscError(e))
+            result = term_tx.send(()) => {
+                Ok(())
             }
             result = service.wait_on() => {
                 result
             }
         };
 
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 1);
         assert!(result.is_ok());
     }
 }
