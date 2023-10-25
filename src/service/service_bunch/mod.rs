@@ -2,52 +2,24 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use notify::event::CreateKind;
-use notify::{Event, EventKind};
 use tokio::select;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;
 
 use crate::configuration::ServiceConfig;
 use crate::connect_addr::ConnectAddr;
-use crate::fs_watcher::FileSystemWatcher;
 
 use super::service_unit::{ProcessID, ServiceUnit, ServiceUnitError};
 use super::unit_connection::UnitConnection;
 use super::Service;
 
-#[derive(Debug)]
-pub enum ServiceBunchError {
-    FailedCreateAddress(std::io::Error),
-    JoinError(tokio::task::JoinError),
-    FailedToStart,
-}
+use self::error::ServiceBunchError;
+use self::message::Message;
+use self::state_machine::StateBox;
 
-impl std::error::Error for ServiceBunchError {}
-
-impl std::fmt::Display for ServiceBunchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ServiceBunchError::FailedCreateAddress(e) => {
-                f.write_fmt(format_args!("{}", e))
-            }
-            ServiceBunchError::JoinError(e) => {
-                f.write_fmt(format_args!("{}", e))
-            }
-            ServiceBunchError::FailedToStart => {
-                f.write_fmt(format_args!("Failed to start"))
-            }
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-enum BunchMode {
-    #[default]
-    Running,
-    Updating,
-    Stopping,
-}
+mod error;
+pub mod message;
+mod state_machine;
 
 pub struct ServiceBunch {
     /// Service's configuration
@@ -56,21 +28,21 @@ pub struct ServiceBunch {
     /// In our case, we have `Vec` with connections to our processes.
     unit_connections: Vec<UnitConnection>,
     join_set: JoinSet<Result<(), ServiceUnitError>>,
-    bunch_mode: BunchMode,
-    fs_watcher: FileSystemWatcher,
+    state: StateBox,
+    controller_connection: Receiver<Message>,
 }
 
 impl ServiceBunch {
     pub fn new(
         config: ServiceConfig,
-        fs_watcher: FileSystemWatcher,
+        controller_connection: Receiver<Message>,
     ) -> ServiceBunch {
         ServiceBunch {
             config,
             unit_connections: Vec::new(),
             join_set: JoinSet::new(),
-            bunch_mode: Default::default(),
-            fs_watcher,
+            state: StateBox::new(),
+            controller_connection,
         }
     }
 
@@ -165,33 +137,35 @@ impl ServiceBunch {
     }
 
     fn handle_service_unit_error(&mut self, serv_err: ServiceUnitError) {
-        use BunchMode::*;
         use ServiceUnitError::*;
 
         match serv_err {
-            ExitError { id, err } => match self.bunch_mode {
-                Running => {
-                    if self.is_limit_exceeded(id) {
-                        // stop service bunch
+            ExitError { id, err } => {
+                tracing::error!("Pid {} exited with error: {}", id, err);
+                if self.is_limit_exceeded(id) {
+                    if self.is_stable(id) {
+                        self.terminate();
                     } else {
-                        // restart service
+                        // stop updating
                     }
                 }
-                Updating => {
-                    if self.is_limit_exceeded(id) {
-                        if self.is_stable(id) {
-                            // stop service bunch
-                        } else {
-                            // stop updating
-                        }
-                    }
-                }
-                Stopping => {
-                    tracing::info!("{}, are stopping, so ignore", err);
-                }
-            },
+            }
             _ => {}
         }
+    }
+
+    fn terminate(&mut self) {
+        self.state.update(state_machine::Event::StopRequest);
+        self.unit_connections.iter().for_each(|service| {
+            // Ignore any send errors, as the receiver may have already been dropped
+            let _ = service.terminate();
+        });
+        self.unit_connections.clear();
+    }
+
+    fn start_update(&mut self) {
+        self.state.update(state_machine::Event::UpdateRequest);
+        //
     }
 }
 
@@ -199,8 +173,6 @@ impl ServiceBunch {
 impl Service<(), ServiceBunchError> for ServiceBunch {
     type Output = ();
 
-    // TODO: implement task queue, it should perform rolling updates, and
-    // check unit services count.
     async fn wait_on(&mut self) -> Result<(), ServiceBunchError> {
         // Wait on child processes execution
         loop {
@@ -212,35 +184,34 @@ impl Service<(), ServiceBunchError> for ServiceBunch {
                             tracing::info!("Some unit service exited wit 0 code")
                         }
                         Some(Ok(Err(serv_err))) => {
-                            tracing::error!(
-                                "ServiceUnit exited with error: {}",
-                                serv_err
-                            );
                             self.handle_service_unit_error(serv_err);
                         }
                         // Some join error
-                        Some(Err(e)) => return Err(ServiceBunchError::JoinError(e)),
-                        // All tasks are finished
+                        Some(Err(e)) => {
+                            let _ = self.terminate();
+                            return Err(ServiceBunchError::JoinError(e))
+                        },
+                        // HINT: This is a normal loop exit point
                         None => return Ok(()),
                     }
                 }
-                notify = self.fs_watcher.receiver.recv() => {
-                    // Got filesystem notification
+                notify = self.controller_connection.recv() => {
                     match notify {
-                        Some(Ok(e)) => {
-                            tracing::info!(
-                                "Fs event: {:?}, kind: {:?}",
-                                e.paths,
-                                e.kind
-                            );
-                            match e.kind {
-                                EventKind::Create(_) => {
-                                    // TODO: handle binary uploading
+                        Some(message) => {
+                            match message {
+                                message::Message::StartUpdate => {
+                                    self.start_update();
                                 }
-                                _ => {}
+                                message:: Message::Shutdown => {
+                                    let _ = self.terminate();
+                                    return Ok(())
+                                }
                             }
                         }
-                        _ => todo!(),
+                        None => {
+                            let _ = self.terminate();
+                            return Err(ServiceBunchError::ControllerConnectionDropped)
+                        }
                     }
                 }
             }
@@ -264,7 +235,8 @@ impl Service<(), ServiceBunchError> for ServiceBunch {
                 Ok(pid) => pid,
                 Err(e) => {
                     tracing::error!("Failed to start ServiceUnit with: {}", e);
-                    let _ = self.try_terminate();
+                    self.state.update(state_machine::Event::StopRequest);
+                    let _ = self.terminate();
                     return Err(ServiceBunchError::FailedToStart);
                 }
             };
@@ -274,15 +246,7 @@ impl Service<(), ServiceBunchError> for ServiceBunch {
             self.unit_connections
                 .push(UnitConnection::new(term_tx, pid));
         }
-
-        Ok(())
-    }
-
-    fn try_terminate(&mut self) -> Result<(), ServiceBunchError> {
-        self.unit_connections.iter().for_each(|service| {
-            // Ignore any send errors, as the receiver may have already been dropped
-            let _ = service.terminate();
-        });
+        self.state.update(state_machine::Event::ServicesEstablished);
         Ok(())
     }
 }
@@ -346,20 +310,18 @@ fn find_min_not_occupied(mut numbers: Vec<u16>) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use crate::fs_watcher::{self, FileSystemWatcher};
-
     use super::*;
 
     #[test]
     fn test_figure_out_bunch_of_addresses_unix() {
         let config = ServiceConfig::create_test_config();
-        let fs_watcher = FileSystemWatcher::new(&config.app_dir);
+        let (_tx, controller_connection) = tokio::sync::mpsc::channel(100);
         let bunch = ServiceBunch {
             config: config.clone(),
             unit_connections: Vec::new(),
             join_set: JoinSet::new(),
-            bunch_mode: BunchMode::default(),
-            fs_watcher,
+            state: StateBox::new(),
+            controller_connection,
         };
         let addresses = bunch.figure_out_bunch_of_addresses().unwrap();
 
@@ -384,13 +346,13 @@ mod tests {
             ..ServiceConfig::create_test_config()
         };
 
-        let fs_watcher = FileSystemWatcher::new(&config.app_dir);
+        let (_tx, controller_connection) = tokio::sync::mpsc::channel(100);
         let bunch = ServiceBunch {
             config: config.clone(),
             unit_connections: Vec::new(),
             join_set: JoinSet::new(),
-            bunch_mode: BunchMode::default(),
-            fs_watcher,
+            state: StateBox::new(),
+            controller_connection,
         };
         let addresses = bunch.figure_out_bunch_of_addresses().unwrap();
 

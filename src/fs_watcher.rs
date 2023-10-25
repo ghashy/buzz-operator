@@ -15,7 +15,7 @@ pub struct FileSystemWatcher {
 }
 
 impl FileSystemWatcher {
-    pub fn new(path: &Path) -> FileSystemWatcher {
+    pub fn new(paths: &[&Path]) -> FileSystemWatcher {
         let (tx, rx) = mpsc::channel(100);
 
         let mut watcher = notify::recommended_watcher(move |res| {
@@ -24,8 +24,9 @@ impl FileSystemWatcher {
         })
         .unwrap();
 
-        // Add a path to be watched.
-        watcher.watch(path, RecursiveMode::NonRecursive).unwrap();
+        for &path in paths.iter() {
+            watcher.watch(path, RecursiveMode::NonRecursive).unwrap();
+        }
 
         // Create an instance of the custom Future
         FileSystemWatcher {

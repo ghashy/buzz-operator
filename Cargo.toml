@@ -29,7 +29,7 @@ serde = { version = "1.0.186", features = ["derive"] }
 chrono = "0.4.26"
 
 [dev-dependencies]
-tokio-test = "0.4.3"
+# tokio-test = "0.4.3"
 
 [profile.dev]
 opt-level = 3

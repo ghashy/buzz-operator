@@ -3,7 +3,7 @@ use tokio::{
     time::Instant,
 };
 
-use super::service_unit::{ProcessID, TermSignal};
+use super::service_unit::ProcessID;
 
 #[derive(Clone, Default)]
 enum UnitMode {
@@ -15,7 +15,7 @@ enum UnitMode {
 #[derive(Clone)]
 pub(super) struct UnitConnection {
     pub(super) last_check_time: Instant,
-    termination_sender: mpsc::Sender<TermSignal>,
+    termination_sender: mpsc::Sender<()>,
     pid: ProcessID,
     failure_count: u16,
     mode: UnitMode,
@@ -23,10 +23,7 @@ pub(super) struct UnitConnection {
 }
 
 impl UnitConnection {
-    pub(super) fn new(
-        sender: mpsc::Sender<TermSignal>,
-        pid: ProcessID,
-    ) -> Self {
+    pub(super) fn new(sender: mpsc::Sender<()>, pid: ProcessID) -> Self {
         UnitConnection {
             termination_sender: sender,
             pid,
@@ -50,7 +47,7 @@ impl UnitConnection {
     pub(super) fn get_pid(&self) -> ProcessID {
         self.pid
     }
-    pub(crate) async fn terminate(&self) -> Result<(), SendError<TermSignal>> {
-        self.termination_sender.blocking_send(TermSignal::Terminate)
+    pub(crate) async fn terminate(&self) -> Result<(), SendError<()>> {
+        self.termination_sender.blocking_send(())
     }
 }

@@ -19,6 +19,4 @@ where
     fn run(&mut self) -> Result<Self::Output, E>;
     /// This function waits until the service exits itself, or terminated.
     async fn wait_on(&mut self) -> Result<T, E>;
-    // REVIEW: maybe &self is more appropriate?
-    fn try_terminate(&mut self) -> Result<T, E>;
 }

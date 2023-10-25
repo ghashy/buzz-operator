@@ -92,6 +92,37 @@ impl ServiceUnit {
             term_rx,
         })
     }
+
+    fn terminate(&self) {
+        let pid = self.id.unwrap() as i32;
+
+        unsafe {
+            if libc::kill(pid, 0) != 0 {
+                tracing::info!("No process with pid {}!", pid);
+                return;
+            }
+            let result = libc::kill(pid, libc::SIGTERM);
+            if result == 0 {
+                tracing::info!("Process with pid {} terminated", pid);
+            } else {
+                tracing::error!(
+                    "Process with pid {}, can't be terminated, error code: {}",
+                    pid,
+                    result
+                );
+                let result = libc::kill(pid, libc::SIGKILL);
+                if result == 0 {
+                    tracing::warn!("Process with pid {} killed", pid);
+                } else {
+                    tracing::error!(
+                        "Process with pid {}, can't be killed, error code: {}",
+                        pid,
+                        result
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -128,7 +159,7 @@ impl Service<(), ServiceUnitError> for ServiceUnit {
                     },
                 }
             }
-            signal = self.term_rx.recv() => {
+            _ = self.term_rx.recv() => {
                 tracing::info!("Terminating service with id {}", self.id.unwrap());
                 // Handle rolling update request
                 self.terminate();
@@ -137,44 +168,11 @@ impl Service<(), ServiceUnitError> for ServiceUnit {
             }
         }
     }
-
-    /// Try to terminate child process.
-    fn terminate(&mut self) {
-        let pid = self.id.unwrap() as i32;
-
-        unsafe {
-            if libc::kill(pid, 0) != 0 {
-                tracing::info!("No process with pid {}!", pid);
-                return;
-            }
-            let result = libc::kill(pid, libc::SIGTERM);
-            if result == 0 {
-                tracing::info!("Process with pid {} terminated", pid);
-            } else {
-                tracing::error!(
-                    "Process with pid {}, can't be terminated, error code: {}",
-                    pid,
-                    result
-                );
-                let result = libc::kill(pid, libc::SIGKILL);
-                if result == 0 {
-                    tracing::warn!("Process with pid {} killed", pid);
-                } else {
-                    tracing::error!(
-                        "Process with pid {}, can't be killed, error code: {}",
-                        pid,
-                        result
-                    );
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio_test::task::spawn;
 
     #[tokio::test]
     async fn wait_success() {
@@ -191,7 +189,7 @@ mod tests {
         let run = service.run();
         assert!(run.is_ok());
 
-        let result = spawn(service.wait_on()).await;
+        let result = service.wait_on().await;
         assert!(result.is_ok());
     }
 
@@ -209,7 +207,7 @@ mod tests {
         let run = service.run();
         assert!(run.is_ok());
 
-        let result = spawn(service.wait_on()).await;
+        let result = service.wait_on().await;
         assert!(result.is_err());
     }
 
@@ -226,21 +224,25 @@ mod tests {
             term_rx,
         };
 
+        // Run service
         let run = service.run();
         assert!(run.is_ok());
+
         let pid = run.unwrap();
+
+        // Assert that process exists
         assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
 
-        let result = tokio::select! {
-            result = term_tx.send(()) => {
-                Ok(())
-            }
-            result = service.wait_on() => {
-                result
-            }
-        };
+        let (service, term) = tokio::join!(service.wait_on(), term_tx.send(()));
 
-        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 1);
-        assert!(result.is_ok());
+        // Assert that terminate signal was sent
+        assert!(term.is_ok());
+        assert!(service.is_ok());
+
+        // Wait system to perform termination
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Assert that process was terminated
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
     }
 }

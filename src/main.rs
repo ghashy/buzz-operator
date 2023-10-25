@@ -15,21 +15,7 @@ async fn main() {
         configuration::Configuration::load_configuration().unwrap();
 
     let config = services_configuration.services[0].clone();
-    let fs_watcher = FileSystemWatcher::new(&config.app_dir);
-    let mut bunch = ServiceBunch::new(config, fs_watcher);
-
-    bunch.run().unwrap();
-    match bunch.wait_on().await {
-        Ok(_) => {}
-        Err(e) => println!("{:}", e),
-    }
-
-    // let term = tokio::spawn(async {
-    //     tokio::time::sleep(Duration::from_secs(5)).await;
-    //     return;
-    // });
-
-    // let (a, b) = tokio::join!(term, bunch.run_and_wait());
+    let fs_watcher = FileSystemWatcher::new(&[&config.app_dir]);
 }
 
 fn init_tracing_subscriber() {
