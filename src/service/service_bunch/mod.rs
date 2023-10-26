@@ -84,7 +84,7 @@ impl ServiceBunch {
         };
 
         // Limit to 1 for unstable
-        if self.is_stable(connection.get_pid()) {
+        if !self.is_stable(connection.get_pid()) {
             return true;
         }
 
@@ -93,8 +93,8 @@ impl ServiceBunch {
 
         if self.last_check_time.elapsed() > Duration::from_secs(60) {
             tracing::warn!(
-                "ServiceUnit failure found, pid: {}, 60 sec timer started",
-                pid
+                "ServiceUnit failure found, name {}, 60 sec timer started",
+                self.config.name
             );
             self.failures_reset();
             return false;
@@ -102,13 +102,13 @@ impl ServiceBunch {
 
         let limit = self.config.fails_limit;
         if failures_count > limit {
-            tracing::warn!("Got {} failures in ServiceUnit with pid: {}, limit is {}, stopping", failures_count, pid, limit);
+            tracing::warn!("Got {} failures in ServiceUnit with name {}, limit is {}, stopping", failures_count, self.config.name, limit);
             true
         } else {
             tracing::warn!(
-                "Got {} failures in ServiceUnit with pid: {}",
+                "Got {} failures in ServiceUnit with name {}",
                 failures_count,
-                pid
+                self.config.name
             );
             false
         }
@@ -128,7 +128,7 @@ impl ServiceBunch {
                     }
                 } else {
                     // Restart service
-                    self.stable_connections.retain(|c| c.get_pid() == id);
+                    self.stable_connections.retain(|c| c.get_pid() != id);
                     let address = self
                         .get_single_address()
                         .expect("Can't get single address");
@@ -229,6 +229,7 @@ impl ServiceBunch {
             }
         };
         self.join_set.spawn(async move { service.wait_on().await });
+        tracing::info!("New unit service spawned with pid {}", pid);
         Ok((term_tx, pid))
     }
 }
@@ -413,7 +414,7 @@ mod test_pack1 {
     #[test]
     fn test_find_available_addresses_unix() {
         let config = ServiceConfig::create_test_config();
-        let (config, addresses) = prepare_addresses(config);
+        let (config, addresses) = prepare_bunch_and_addresses(config);
 
         assert_eq!(addresses.len(), config.instances_count as usize);
         for address in addresses {
@@ -435,7 +436,7 @@ mod test_pack1 {
             },
             ..ServiceConfig::create_test_config()
         };
-        let (config, addresses) = prepare_addresses(config);
+        let (config, addresses) = prepare_bunch_and_addresses(config);
 
         assert_eq!(addresses.len(), config.instances_count as usize);
         let mut port = 8000;
@@ -479,7 +480,7 @@ mod test_pack1 {
         assert_eq!(min, 3);
     }
 
-    fn prepare_addresses(
+    fn prepare_bunch_and_addresses(
         config: ServiceConfig,
     ) -> (ServiceConfig, Vec<ConnectAddr>) {
         let (_tx, controller_connection) = tokio::sync::mpsc::channel(100);
