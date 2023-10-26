@@ -1,9 +1,10 @@
+use std::mem::swap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::select;
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{self, Receiver};
 use tokio::task::JoinSet;
 
 use crate::configuration::ServiceConfig;
@@ -31,6 +32,9 @@ pub struct ServiceBunch {
     join_set: JoinSet<Result<(), ServiceUnitError>>,
     state: StateBox,
     controller_connection: Receiver<Message>,
+
+    failure_count: u16,
+    last_check_time: Instant,
 }
 
 impl ServiceBunch {
@@ -38,50 +42,61 @@ impl ServiceBunch {
         config: ServiceConfig,
         controller_connection: Receiver<Message>,
     ) -> ServiceBunch {
+        let capacity = config.instances_count as usize;
         ServiceBunch {
             config,
-            stable_connections: Vec::new(),
+            stable_connections: Vec::with_capacity(capacity),
             new_connections: Vec::new(),
             join_set: JoinSet::new(),
             state: StateBox::new(),
             controller_connection,
+            failure_count: 0,
+            last_check_time: Instant::now(),
         }
     }
 
     fn is_stable(&self, pid: ProcessID) -> bool {
-        match self.stable_connections.iter().find(|a| a.get_pid() == pid) {
-            Some(s) => s.is_stable(),
-            None => false,
+        match self.new_connections.iter().find(|c| c.get_pid() == pid) {
+            Some(s) => false,
+            None => true,
         }
+    }
+
+    fn failure_add(&mut self) -> u16 {
+        self.failure_count += 1;
+        self.failure_count
+    }
+
+    fn failures_reset(&mut self) {
+        self.last_check_time = Instant::now();
+        self.failure_count = 0;
     }
 
     /// If failure happened with stable service version, limit taken from the
     /// service config, and if it happened with unstable service, limit is 1.
     fn is_limit_exceeded(&mut self, pid: ProcessID) -> bool {
-        // Wait until failure signal
-        let Some(connection) = self
-            .stable_connections
-            .iter_mut()
-            .find(|a| a.get_pid() == pid)
+        // Check connection is it stable or not
+        let Some(connection) =
+            self.stable_connections.iter().find(|c| c.get_pid() == pid)
         else {
             tracing::warn!("Was checking failures, pid not found: {}", pid);
             return false;
         };
 
         // Limit to 1 for unstable
-        if !connection.is_stable() {
+        if self.is_stable(connection.get_pid()) {
             return true;
         }
 
         // Calculate the failures within the last minute
-        let failures_count = connection.failure_add();
+        let failures_count = self.failure_add();
 
-        if connection.last_check_time.elapsed() > Duration::from_secs(60) {
+        if self.last_check_time.elapsed() > Duration::from_secs(60) {
             tracing::warn!(
                 "ServiceUnit failure found, pid: {}, 60 sec timer started",
                 pid
             );
-            connection.failures_reset();
+            self.failures_reset();
             return false;
         }
 
@@ -111,6 +126,20 @@ impl ServiceBunch {
                     } else {
                         self.state.update(state_machine::Event::UpdatingFailed);
                     }
+                } else {
+                    // Restart service
+                    self.stable_connections.retain(|c| c.get_pid() == id);
+                    let address = self
+                        .get_single_address()
+                        .expect("Can't get single address");
+                    let (term_tx, pid) = self
+                        .spawn_unit_service(&address)
+                        .expect("Can't spawn unit service");
+                    self.stable_connections.push(UnitConnection::new(
+                        term_tx,
+                        pid,
+                        address.clone(),
+                    ));
                 }
             }
             _ => {}
@@ -139,31 +168,12 @@ impl ServiceBunch {
         while !self.stable_connections.is_empty()
             && self.state.is(state_machine::State::Updating)
         {
-            let addressses = find_available_addresses(
-                &self.config.name,
-                &self.config.connect_addr,
-                1,
-            )
-            .map_err(|e| ServiceBunchError::FailedCreateAddress(e))?;
-            let address = &addressses[0];
+            let address = self.get_single_address()?;
 
-            let (term_tx, term_rx) = tokio::sync::mpsc::channel(100);
-            let mut service =
-                ServiceUnit::new(&self.config, address, term_rx).unwrap();
-
-            // Run service
-            let pid = match service.run() {
-                Ok(pid) => pid,
-                Err(e) => {
-                    tracing::error!("Failed to start ServiceUnit with: {}", e);
-                    self.state.update(state_machine::Event::StopRequest);
-                    let _ = self.terminate();
-                    return Err(ServiceBunchError::FailedToStart);
-                }
+            let (term_tx, pid) = match self.spawn_unit_service(&address) {
+                Ok(value) => value,
+                Err(value) => return value,
             };
-
-            // Add to join
-            self.join_set.spawn(async move { service.wait_on().await });
 
             self.new_connections.push(UnitConnection::new(
                 term_tx,
@@ -184,7 +194,42 @@ impl ServiceBunch {
                 return Err(ServiceBunchError::UpdateIterrupted);
             }
         }
+
+        // On this point stable_connections should be empty
+        swap(&mut self.stable_connections, &mut self.new_connections);
+        self.state.update(state_machine::Event::ServicesEstablished);
         Ok(())
+    }
+
+    fn get_single_address(&mut self) -> Result<ConnectAddr, ServiceBunchError> {
+        let mut addressses = find_available_addresses(
+            &self.config.name,
+            &self.config.connect_addr,
+            1,
+        )
+        .map_err(|e| ServiceBunchError::FailedCreateAddress(e))?;
+        let address = addressses.pop().unwrap();
+        Ok(address)
+    }
+
+    fn spawn_unit_service(
+        &mut self,
+        address: &ConnectAddr,
+    ) -> Result<(mpsc::Sender<()>, u32), Result<(), ServiceBunchError>> {
+        let (term_tx, term_rx) = tokio::sync::mpsc::channel(100);
+        let mut service =
+            ServiceUnit::new(&self.config, address, term_rx).unwrap();
+        let pid = match service.run() {
+            Ok(pid) => pid,
+            Err(e) => {
+                tracing::error!("Failed to start ServiceUnit with: {}", e);
+                self.state.update(state_machine::Event::StopRequest);
+                let _ = self.terminate();
+                return Err(Err(ServiceBunchError::FailedToStart));
+            }
+        };
+        self.join_set.spawn(async move { service.wait_on().await });
+        Ok((term_tx, pid))
     }
 }
 
@@ -220,7 +265,8 @@ impl Service<(), ServiceBunchError> for ServiceBunch {
                             match message {
                                 message::Message::StartUpdate => {
                                     match self.start_update().await {
-                                        Ok(_) => todo!(),
+                                        Ok(_) => {
+                                        },
                                         Err(e) => tracing::error!("{}", e),
                                     }
                                 }
@@ -250,23 +296,10 @@ impl Service<(), ServiceBunchError> for ServiceBunch {
         .map_err(|e| ServiceBunchError::FailedCreateAddress(e))?;
 
         for address in addresses.iter() {
-            // This is channel to communicate with each service process
-            let (term_tx, term_rx) = tokio::sync::mpsc::channel(100);
-            let mut service =
-                ServiceUnit::new(&self.config, address, term_rx).unwrap();
-
-            // Run service
-            let pid = match service.run() {
-                Ok(pid) => pid,
-                Err(e) => {
-                    tracing::error!("Failed to start ServiceUnit with: {}", e);
-                    self.state.update(state_machine::Event::StopRequest);
-                    let _ = self.terminate();
-                    return Err(ServiceBunchError::FailedToStart);
-                }
+            let (term_tx, pid) = match self.spawn_unit_service(address) {
+                Ok(value) => value,
+                Err(value) => return value,
             };
-            // Add to join
-            self.join_set.spawn(async move { service.wait_on().await });
 
             self.stable_connections.push(UnitConnection::new(
                 term_tx,
@@ -374,27 +407,13 @@ fn find_min_not_occupied(mut numbers: Vec<u16>) -> u16 {
 }
 
 #[cfg(test)]
-mod tests {
+mod test_pack1 {
     use super::*;
 
     #[test]
-    fn test_figure_out_bunch_of_addresses_unix() {
+    fn test_find_available_addresses_unix() {
         let config = ServiceConfig::create_test_config();
-        let (_tx, controller_connection) = tokio::sync::mpsc::channel(100);
-        let bunch = ServiceBunch {
-            config: config.clone(),
-            stable_connections: Vec::new(),
-            join_set: JoinSet::new(),
-            state: StateBox::new(),
-            controller_connection,
-            new_connections: Vec::new(),
-        };
-        let addresses = find_available_addresses(
-            &bunch.config.name,
-            &bunch.config.connect_addr,
-            bunch.config.instances_count,
-        )
-        .unwrap();
+        let (config, addresses) = prepare_addresses(config);
 
         assert_eq!(addresses.len(), config.instances_count as usize);
         for address in addresses {
@@ -408,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn test_figure_out_bunch_of_addresses_tcp() {
+    fn test_find_available_addresses_tcp() {
         let config = ServiceConfig {
             connect_addr: ConnectAddr::Tcp {
                 addr: "127.0.0.1".parse().unwrap(),
@@ -416,22 +435,7 @@ mod tests {
             },
             ..ServiceConfig::create_test_config()
         };
-
-        let (_tx, controller_connection) = tokio::sync::mpsc::channel(100);
-        let bunch = ServiceBunch {
-            config: config.clone(),
-            stable_connections: Vec::new(),
-            join_set: JoinSet::new(),
-            state: StateBox::new(),
-            controller_connection,
-            new_connections: Vec::new(),
-        };
-        let addresses = find_available_addresses(
-            &bunch.config.name,
-            &bunch.config.connect_addr,
-            bunch.config.instances_count,
-        )
-        .unwrap();
+        let (config, addresses) = prepare_addresses(config);
 
         assert_eq!(addresses.len(), config.instances_count as usize);
         let mut port = 8000;
@@ -474,4 +478,36 @@ mod tests {
         let min = find_min_not_occupied(numbers);
         assert_eq!(min, 3);
     }
+
+    fn prepare_addresses(
+        config: ServiceConfig,
+    ) -> (ServiceConfig, Vec<ConnectAddr>) {
+        let (_tx, controller_connection) = tokio::sync::mpsc::channel(100);
+        let bunch = ServiceBunch {
+            config: config.clone(),
+            stable_connections: Vec::new(),
+            join_set: JoinSet::new(),
+            state: StateBox::new(),
+            controller_connection,
+            new_connections: Vec::new(),
+            failure_count: 0,
+            last_check_time: Instant::now(),
+        };
+        let addresses = find_available_addresses(
+            &bunch.config.name,
+            &bunch.config.connect_addr,
+            bunch.config.instances_count,
+        )
+        .unwrap();
+        (config, addresses)
+    }
+}
+
+// TODO: add new tests
+#[cfg(test)]
+mod test_pack2 {
+    use super::*;
+
+    #[tokio::test]
+    async fn test1() {}
 }

@@ -16,12 +16,9 @@ enum UnitMode {
 
 #[derive(Clone)]
 pub(super) struct UnitConnection {
-    pub(super) last_check_time: Instant,
     termination_sender: mpsc::Sender<()>,
     pid: ProcessID,
-    failure_count: u16,
     mode: UnitMode,
-    is_stable: bool,
     connect_addr: ConnectAddr,
 }
 
@@ -34,23 +31,9 @@ impl UnitConnection {
         UnitConnection {
             termination_sender: sender,
             pid,
-            failure_count: 0,
             mode: UnitMode::default(),
-            last_check_time: Instant::now(),
-            is_stable: true,
             connect_addr,
         }
-    }
-    pub(super) fn failure_add(&mut self) -> u16 {
-        self.failure_count += 1;
-        self.failure_count
-    }
-    pub(super) fn failures_reset(&mut self) {
-        self.last_check_time = Instant::now();
-        self.failure_count = 0;
-    }
-    pub(super) fn is_stable(&self) -> bool {
-        self.is_stable
     }
     pub(super) fn get_pid(&self) -> ProcessID {
         self.pid
