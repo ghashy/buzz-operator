@@ -6,17 +6,19 @@ pub mod service_bunch;
 pub mod service_unit;
 mod unit_connection;
 
-// /// Service can exit with just Succes, or with a variety of Errors
-// type Result<E> = std::result::Result<(), E>;
-
+/// This trait generalizes abstract service behavior.
+///
+/// You should strictly follow order of calling functions:
+/// 1. `run`
+/// 2. `wait_on`
 #[async_trait]
-pub trait Service<T, E>
+pub trait Service<E>
 where
     E: Error,
 {
     type Output;
     /// This function should actually run service executing.
-    fn run(&mut self) -> Result<Self::Output, E>;
-    /// This function waits until the service exits itself, or terminated.
-    async fn wait_on(&mut self) -> Result<T, E>;
+    fn run(&mut self) -> std::result::Result<Self::Output, E>;
+    /// This function should wait until the service exits itself, or terminated.
+    async fn wait_on(&mut self) -> Result<(), E>;
 }

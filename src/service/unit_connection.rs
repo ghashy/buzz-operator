@@ -3,22 +3,13 @@ use tokio::{
     time::Instant,
 };
 
-use crate::connect_addr::{self, ConnectAddr};
-
 use super::service_unit::ProcessID;
-
-#[derive(Clone, Default)]
-enum UnitMode {
-    #[default]
-    Keeping,
-    Stopping,
-}
+use crate::connect_addr::{self, ConnectAddr};
 
 #[derive(Clone)]
 pub(super) struct UnitConnection {
     termination_sender: mpsc::Sender<()>,
     pid: ProcessID,
-    mode: UnitMode,
     connect_addr: ConnectAddr,
 }
 
@@ -31,14 +22,13 @@ impl UnitConnection {
         UnitConnection {
             termination_sender: sender,
             pid,
-            mode: UnitMode::default(),
             connect_addr,
         }
     }
     pub(super) fn get_pid(&self) -> ProcessID {
         self.pid
     }
-    pub(crate) async fn terminate(&self) -> Result<(), SendError<()>> {
+    pub(super) async fn terminate(&self) -> Result<(), SendError<()>> {
         self.termination_sender.blocking_send(())
     }
     pub(super) fn addr(&self) -> &ConnectAddr {

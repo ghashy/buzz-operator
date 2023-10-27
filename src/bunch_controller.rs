@@ -4,6 +4,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinSet;
 
 use crate::configuration::Configuration;
+use crate::connect_addr::ConnectAddr;
 use crate::fs_watcher::FileSystemWatcher;
 use crate::service::service_bunch::message::Message;
 use crate::service::service_bunch::{ServiceBunch, ServiceBunchError};
@@ -11,7 +12,6 @@ use crate::service::Service;
 
 struct BunchConnection {
     name: String,
-    rx: Receiver<Message>,
     tx: Sender<Message>,
 }
 
@@ -20,7 +20,7 @@ pub struct BunchController {
     bunch_connections: Vec<BunchConnection>,
     bunches: Vec<ServiceBunch>,
     bunches_join: JoinSet<Result<(), ServiceBunchError>>,
-    rx_join: JoinSet<()>,
+    message_receiver: Receiver<Message>,
     config: Configuration,
 }
 
@@ -28,14 +28,17 @@ impl BunchController {
     pub fn new(config: Configuration) -> BunchController {
         let mut bunches = Vec::new();
         let mut bunch_connections = Vec::new();
+        let (controller_tx, message_receiver) = tokio::sync::mpsc::channel(100);
         for service_config in config.services.clone().into_iter() {
             let (tx, controller_rx) = tokio::sync::mpsc::channel(100);
-            let (controller_tx, rx) = tokio::sync::mpsc::channel(100);
             let name = service_config.name.clone();
-            let service_bunch =
-                ServiceBunch::new(service_config, controller_rx, controller_tx);
+            let service_bunch = ServiceBunch::new(
+                service_config,
+                controller_rx,
+                controller_tx.clone(),
+            );
             bunches.push(service_bunch);
-            bunch_connections.push(BunchConnection { name, rx, tx });
+            bunch_connections.push(BunchConnection { name, tx });
         }
         let fs_watcher = FileSystemWatcher::new(
             &bunches
@@ -48,7 +51,7 @@ impl BunchController {
             bunch_connections,
             bunches,
             bunches_join: JoinSet::new(),
-            rx_join: JoinSet::new(),
+            message_receiver,
             config,
         }
     }
@@ -63,42 +66,71 @@ impl BunchController {
                 .spawn(async move { bunch.wait_on().await });
         }
         // TODO we shoud track all current addresses
-        for mut connection in self.bunch_connections.drain(..).into_iter() {
-            self.rx_join.spawn(async move {
-                match connection.rx.recv().await {
-                    Some(message) => match message {
-                        // Call script add new
-                        Message::ServiceSpawned(addr) => todo!(),
-                        // Call script add new, remove old
-                        Message::ServiceReplaced { old, new } => todo!(),
-                        // Call script remove all old, add all new
-                        Message::UpdateFail(_) => todo!(),
-                        // Call script remove all addresses
-                        Message::ServiceDespawned(_) => todo!(),
-                        _ => unreachable!(),
-                    },
-                    None => todo!(),
-                }
-            });
-        }
         loop {
             tokio::select! {
+                // Wait bunches executing
                 bunch_join = self.bunches_join.join_next() => {
                     match bunch_join {
-                    Some(Ok(Ok(()))) => todo!(),
-                    Some(Ok(Err(bunch_err))) => todo!(),
-                    Some(Err(join_err)) => todo!(),
-                    None => todo!(),
+                    Some(Ok(Ok(()))) => tracing::info!("Some bunch exited with code 0"),
+                    Some(Ok(Err(bunch_err))) => tracing::error!("Some bunch exited with error: {}", bunch_err),
+                    Some(Err(join_err)) => tracing::error!("Join error happened: {}", join_err),
+                    // All bunches finished
+                    None => return,
                     }
                 }
-                rx_join = self.rx_join.join_next() => {
+                // Wait bunches messages
+                rx_join = self.message_receiver.recv() => {
                     match rx_join {
-                        Some(Ok(())) => todo!(),
-                        Some(Err(join_err)) => todo!(),
-                        None => todo!(),
+                        Some(message) => {
+                            match message {
+                                Message::ServiceSpawned(addr) => {
+                                    self.run_script(Some(vec![addr]), None).await;
+                                }
+                                Message::ServiceReplaced { old, new } => {
+                                    self.run_script(Some(vec![new]), Some(vec![old])).await;
+                                },
+                                Message::UpdateFail { old, new} => {
+                                    self.run_script(Some(new), Some(old)).await;
+                                },
+                                Message::ServiceDespawned(old) => {
+                                    self.run_script(None, Some(old)).await;
+                                },
+                                _ => unreachable!(),
+                            }
+                        },
+                        // All bunches exited
+                        None => {
+                            return;
+                        },
+                    }
+                }
+                // Wait fs watcher events
+                watch = self.fs_watcher.receiver.recv() => {
+                    match watch {
+                        // Handle path event
+                        Some(Ok(event)) => {
+                            let paths = event.paths
+                            .iter()
+                            .map(|path| path.to_string_lossy())
+                            .collect::<String>();
+                            println!("FS EVENT: {}", paths);
+                        },
+                        Some(Err(e)) => {
+                            tracing::error!("{}", e);
+                        }
+                        // Filesystem watcher will not exit
+                        None => unreachable!(),
                     }
                 }
             }
         }
+    }
+
+    async fn run_script(
+        &self,
+        new: Option<Vec<ConnectAddr>>,
+        old: Option<Vec<ConnectAddr>>,
+    ) -> bool {
+        todo!()
     }
 }

@@ -5,7 +5,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use notify::Result;
+use notify::{Event, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
@@ -37,7 +37,7 @@ impl FileSystemWatcher {
 }
 
 // impl Future for FileSystemWatcher {
-//     type Output = ();
+//     type Output = Option<Event>;
 
 //     fn poll(
 //         mut self: Pin<&mut Self>,
@@ -46,14 +46,16 @@ impl FileSystemWatcher {
 //         // Poll the receiver for the next event
 //         match self.receiver.poll_recv(cx) {
 //             Poll::Ready(Some(Ok(event))) => {
-//                 println!("Event: {:?}", event);
-//                 Poll::Pending
+//                 tracing::info!("FileSystemWatcher event: {:?}", event);
+//                 Poll::Ready(Some(event))
 //             }
+//             // Just trace error
 //             Poll::Ready(Some(Err(e))) => {
-//                 println!("Error: {:?}", e);
+//                 tracing::error!("FileSystemWatcher error: {}", e);
 //                 Poll::Pending
 //             }
-//             Poll::Ready(None) => Poll::Ready(()), // Receiver closed, future completed
+//             // Receiver closed, future completed
+//             Poll::Ready(None) => Poll::Ready(None),
 //             Poll::Pending => Poll::Pending,
 //         }
 //     }

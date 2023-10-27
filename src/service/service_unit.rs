@@ -9,10 +9,14 @@ use super::Service;
 
 pub(super) type ProcessID = u32;
 
+/// Error type for `ServiceUnit`
 #[derive(Debug)]
 pub enum ServiceUnitError {
+    /// `ServiceUnit` exited with non zero code
     ExitError { id: ProcessID, err: String },
+    /// `run` function failed to start service
     ServiceNotStarted(std::io::Error),
+    /// Any error with [tokio::sync::mpsc::channel]
     MpscError,
 }
 
@@ -32,10 +36,19 @@ impl std::fmt::Display for ServiceUnitError {
     }
 }
 
+/// The lowest abstraction above unix system process.
+///
+/// This is a very simple type, which allows to run, wait, and terminate unix
+/// process. You should follow the [Service](crate::service::Service) trait's
+/// methods call order.
 pub struct ServiceUnit {
+    /// After creating, we store parametrized `Command` in this field
     command: Command,
+    /// We store handle to actual process in this field after `run` was called
     child: Option<tokio::process::Child>,
+    /// We can know `ProcessID` only after we `run` it
     id: Option<ProcessID>,
+    /// Channel for communicating with higher (in program hierarchy) object
     term_rx: mpsc::Receiver<()>,
 }
 
@@ -64,8 +77,10 @@ impl ServiceUnit {
 
         let mut command =
             Command::new(&config.app_dir.join(&config.stable_exec_name));
+        // We run our process in `app_dir` from provided config
         command.current_dir(&config.app_dir);
 
+        // WARN: Backend service we run should accept these arguments
         match address {
             ConnectAddr::Unix(sock) => {
                 command.args(&["--unix-socket".into(), sock.to_owned()]);
@@ -80,7 +95,7 @@ impl ServiceUnit {
             }
         }
 
-        // If there were custom args, pass them
+        // If custom args provided, pass them
         if let Some(args) = &config.start_args {
             command.args(args);
         }
@@ -93,6 +108,9 @@ impl ServiceUnit {
         })
     }
 
+    /// Currently, this app don't support custom termination signals.
+    /// We terminate process in any case. Firstly we try to terminate it gently,
+    /// and then if it didn't work we send [libc::SIGKILL].
     fn terminate(&self) {
         let pid = self.id.unwrap() as i32;
 
@@ -126,7 +144,7 @@ impl ServiceUnit {
 }
 
 #[async_trait]
-impl Service<(), ServiceUnitError> for ServiceUnit {
+impl Service<ServiceUnitError> for ServiceUnit {
     type Output = ProcessID;
 
     fn run(&mut self) -> Result<Self::Output, ServiceUnitError> {

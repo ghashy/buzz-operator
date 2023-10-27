@@ -3,8 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tokio::select;
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinSet;
 
 use crate::configuration::ServiceConfig;
@@ -14,7 +13,7 @@ use super::service_unit::{ProcessID, ServiceUnit, ServiceUnitError};
 use super::unit_connection::UnitConnection;
 use super::Service;
 
-use self::error::ServiceBunchError;
+pub use self::error::ServiceBunchError;
 use self::message::Message;
 use self::state_machine::StateBox;
 
@@ -22,16 +21,37 @@ mod error;
 pub mod message;
 mod state_machine;
 
+/// Type for managing some instances of the same service.
+///
+/// `ServiceBunch` can run one or more instances of a service, restart
+/// these instances on failure, count failures and when certain threshold of
+/// failures count is exceeded, terminates itself.
+/// Also `ServiceBunch` has possibility to perform rolling updates, when it
+/// gets a signal over the [`self.controller_rx`](ServiceBunch::controller_rx)
+/// channel.
 pub struct ServiceBunch {
     /// Service's configuration
     config: ServiceConfig,
     /// This bunch should have some connection to every process.
     /// In our case, we have `Vec` with connections to our processes.
     stable_connections: Vec<UnitConnection>,
+    /// There we store all new connections during the rolling update.
     new_connections: Vec<UnitConnection>,
+    /// It provides us with `awaiting in one place` interface for all
+    /// `ServiceUnit`s.
     join_set: JoinSet<Result<(), ServiceUnitError>>,
+    /// Stores internal simple `finite state machine`.
     state: StateBox,
-    controller_connection: Receiver<Message>,
+
+    /// Connection to higher (in program hierachy) type. Input.
+    controller_rx: Receiver<Message>,
+
+    // TODO: send messages to the parent during working. Parent should get such
+    // information as:
+    // Children process is despawned, its address.
+    // New process is spawned, its addres.
+    /// Connection to higher (in program hierachy) type. Output.
+    controller_tx: Sender<Message>,
 
     failure_count: u16,
     last_check_time: Instant,
@@ -40,7 +60,8 @@ pub struct ServiceBunch {
 impl ServiceBunch {
     pub fn new(
         config: ServiceConfig,
-        controller_connection: Receiver<Message>,
+        controller_rx: Receiver<Message>,
+        controller_tx: Sender<Message>,
     ) -> ServiceBunch {
         let capacity = config.instances_count as usize;
         ServiceBunch {
@@ -49,15 +70,22 @@ impl ServiceBunch {
             new_connections: Vec::new(),
             join_set: JoinSet::new(),
             state: StateBox::new(),
-            controller_connection,
+            controller_rx,
+            controller_tx,
             failure_count: 0,
             last_check_time: Instant::now(),
         }
     }
 
-    fn is_stable(&self, pid: ProcessID) -> bool {
+    pub fn get_config(&self) -> &ServiceConfig {
+        &self.config
+    }
+
+    /// Returns `false`, if found process with given `pid` among
+    /// the `new_connections`. Otherwise, `true`.
+    fn is_new_pid(&self, pid: ProcessID) -> bool {
         match self.new_connections.iter().find(|c| c.get_pid() == pid) {
-            Some(s) => false,
+            Some(_) => false,
             None => true,
         }
     }
@@ -72,8 +100,9 @@ impl ServiceBunch {
         self.failure_count = 0;
     }
 
-    /// If failure happened with stable service version, limit taken from the
-    /// service config, and if it happened with unstable service, limit is 1.
+    /// If failure happens with a stable service version, we take the limit
+    /// value from the service config, but if failure happens with
+    /// the `new version` service (during rolling update), limit is set to `1`.
     fn is_limit_exceeded(&mut self, pid: ProcessID) -> bool {
         // Check connection is it stable or not
         let Some(connection) =
@@ -84,7 +113,7 @@ impl ServiceBunch {
         };
 
         // Limit to 1 for unstable
-        if !self.is_stable(connection.get_pid()) {
+        if !self.is_new_pid(connection.get_pid()) {
             return true;
         }
 
@@ -114,6 +143,14 @@ impl ServiceBunch {
         }
     }
 
+    /// In the underlying service [`Service::run`] function,
+    /// [`ServiceUnitError`] can happen. In this case we handle it here.
+    /// We do three things here:
+    /// 1. If failure limit is not exceeded, restart underlying [`ServiceUnit`].
+    /// 2. If rolling update is performing at the moment, and failed service is
+    /// from the new version, stop the rolling update.
+    /// 3. If failure limit is exceeded, stop all underlying services using
+    /// [`ServiceBunch::terminate`].
     fn handle_service_unit_error(&mut self, serv_err: ServiceUnitError) {
         use ServiceUnitError::*;
 
@@ -121,7 +158,7 @@ impl ServiceBunch {
             ExitError { id, err } => {
                 tracing::error!("Pid {} exited with error: {}", id, err);
                 if self.is_limit_exceeded(id) {
-                    if self.is_stable(id) {
+                    if self.is_new_pid(id) {
                         self.terminate();
                     } else {
                         self.state.update(state_machine::Event::UpdatingFailed);
@@ -146,6 +183,10 @@ impl ServiceBunch {
         }
     }
 
+    /// Stop all underlying `ServiceUnit` instances, `self.join_set` will exit
+    /// at the [`JoinSet::join_next()`] in the `run` function inside [`select!`]
+    /// macro, and then this `ServiceBunch` will return control to the parent
+    /// type.
     fn terminate(&mut self) {
         self.state.update(state_machine::Event::StopRequest);
         self.stable_connections.iter().for_each(|service| {
@@ -155,13 +196,12 @@ impl ServiceBunch {
         self.stable_connections.clear();
     }
 
-    /*
-        HINT: What this fn does:
-        1. Run new async task which will spawn new process and exit after
-        timeout.
-        2. After timeout despawn one stable process.
-        3. Do all again until all processes will be replaced.
-    */
+    /// How it works:
+    /// 1. Run a new async task which will spawn new process and exit after
+    /// timeout.
+    /// 2. Next, if it is still in the `State::Update`, despawn one stable
+    /// process.
+    /// 3. Do all again until all children processes will be replaced.
     async fn start_update(&mut self) -> Result<(), ServiceBunchError> {
         self.state.update(state_machine::Event::UpdateRequest);
 
@@ -181,7 +221,8 @@ impl ServiceBunch {
                 address.clone(),
             ));
 
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            // TODO: compute update time with config's setting in mind.
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
             let connection = self.stable_connections.pop().unwrap();
             connection.terminate().await.unwrap();
@@ -195,12 +236,15 @@ impl ServiceBunch {
             }
         }
 
-        // On this point stable_connections should be empty
+        // At this point stable_connections should be empty
         swap(&mut self.stable_connections, &mut self.new_connections);
         self.state.update(state_machine::Event::ServicesEstablished);
         Ok(())
     }
 
+    /// Provides our app with correct and working
+    /// [`ConnectAddr`](crate::connect_addr::ConnectAddr). It can select
+    /// free tcp port, as well as find unix socket path.
     fn get_single_address(&mut self) -> Result<ConnectAddr, ServiceBunchError> {
         let mut addressses = find_available_addresses(
             &self.config.name,
@@ -212,6 +256,8 @@ impl ServiceBunch {
         Ok(address)
     }
 
+    /// Spawn single [`ServiceUnit`]. If it can't spawn service, it will stop
+    /// this `ServiceBunch`.
     fn spawn_unit_service(
         &mut self,
         address: &ConnectAddr,
@@ -235,13 +281,13 @@ impl ServiceBunch {
 }
 
 #[async_trait]
-impl Service<(), ServiceBunchError> for ServiceBunch {
+impl Service<ServiceBunchError> for ServiceBunch {
     type Output = ();
 
     async fn wait_on(&mut self) -> Result<(), ServiceBunchError> {
         // Wait on child processes execution
         loop {
-            select! {
+            tokio::select! {
                 join = self.join_set.join_next() => {
                     // Some service finished
                     match join {
@@ -260,7 +306,7 @@ impl Service<(), ServiceBunchError> for ServiceBunch {
                         None => return Ok(()),
                     }
                 }
-                notify = self.controller_connection.recv() => {
+                notify = self.controller_rx.recv() => {
                     match notify {
                         Some(message) => {
                             match message {
@@ -275,6 +321,7 @@ impl Service<(), ServiceBunchError> for ServiceBunch {
                                     let _ = self.terminate();
                                     return Ok(())
                                 }
+                                _ => unreachable!()
                             }
                         }
                         None => {
@@ -393,6 +440,7 @@ fn get_sockets_paths(
         .collect())
 }
 
+/// Finds minimal available number in range 0..∞
 fn find_min_not_occupied(mut numbers: Vec<u16>) -> u16 {
     numbers.sort();
 
@@ -483,13 +531,15 @@ mod test_pack1 {
     fn prepare_bunch_and_addresses(
         config: ServiceConfig,
     ) -> (ServiceConfig, Vec<ConnectAddr>) {
-        let (_tx, controller_connection) = tokio::sync::mpsc::channel(100);
+        let (_tx, controller_rx) = tokio::sync::mpsc::channel(100);
+        let (controller_tx, _rx) = tokio::sync::mpsc::channel(100);
         let bunch = ServiceBunch {
             config: config.clone(),
             stable_connections: Vec::new(),
             join_set: JoinSet::new(),
             state: StateBox::new(),
-            controller_connection,
+            controller_rx,
+            controller_tx,
             new_connections: Vec::new(),
             failure_count: 0,
             last_check_time: Instant::now(),

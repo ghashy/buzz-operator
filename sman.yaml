@@ -15,7 +15,7 @@ services:
     # or, if unavailable, other random addresses.
     connect_addr:
       addr: "127.0.0.1"
-      port: 80
+      port: 8000
     # Allowed count of unexpected fails per minute for single process.
     # Set to 5 by default.
     fails_limit: 5
