@@ -1,3 +1,5 @@
+//! Simple state machine for [`ServiceBunch`](super::ServiceBunch) type.
+
 #[derive(Debug, Clone, Copy)]
 pub enum Event {
     UpdateRequest,
@@ -75,59 +77,3 @@ impl StateBox {
         self.0 == with
     }
 }
-
-// struct BunchStateMachine<S> {
-//     state: S,
-// }
-
-// struct Starting;
-
-// struct Running;
-
-// struct Updating;
-
-// struct Stopping;
-
-// pub enum BunchMode {
-//     Starting(BunchStateMachine<Starting>),
-//     Running(BunchStateMachine<Running>),
-//     Updating(BunchStateMachine<Updating>),
-//     Stopping(BunchStateMachine<Stopping>),
-// }
-
-// impl BunchMode {
-//     pub fn new() -> Self {
-//         BunchMode::Starting(BunchStateMachine { state: Starting {} })
-//     }
-//     pub fn consume()
-// }
-
-// impl From<BunchStateMachine<Starting>> for BunchStateMachine<Running> {
-//     fn from(value: BunchStateMachine<Starting>) -> Self {
-//         BunchStateMachine { state: Running {} }
-//     }
-// }
-
-// impl From<BunchStateMachine<Running>> for BunchStateMachine<Updating> {
-//     fn from(value: BunchStateMachine<Running>) -> Self {
-//         BunchStateMachine { state: Updating {} }
-//     }
-// }
-
-// impl From<BunchStateMachine<Running>> for BunchStateMachine<Stopping> {
-//     fn from(value: BunchStateMachine<Running>) -> Self {
-//         BunchStateMachine { state: Stopping {} }
-//     }
-// }
-
-// impl From<BunchStateMachine<Updating>> for BunchStateMachine<Running> {
-//     fn from(value: BunchStateMachine<Updating>) -> Self {
-//         BunchStateMachine { state: Running {} }
-//     }
-// }
-
-// impl From<BunchStateMachine<Updating>> for BunchStateMachine<Stopping> {
-//     fn from(value: BunchStateMachine<Updating>) -> Self {
-//         BunchStateMachine { state: Stopping {} }
-//     }
-// }

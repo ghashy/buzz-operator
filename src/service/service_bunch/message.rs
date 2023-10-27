@@ -1,5 +1,7 @@
 use crate::connect_addr::ConnectAddr;
 
+/// Type for communication between [`ServiceBunch`](super::ServiceBunch) and
+/// any higher controller type.
 pub enum Message {
     // From controller
     StartUpdate,

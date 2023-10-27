@@ -9,6 +9,8 @@ use notify::{Event, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
+/// Type for listening events from filesystem. Provide us with possibility to
+/// detect new binary file upload event.
 pub struct FileSystemWatcher {
     watcher: RecommendedWatcher,
     pub receiver: mpsc::Receiver<Result<notify::Event>>,

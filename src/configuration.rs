@@ -1,3 +1,5 @@
+//! Here we manage user configuration file.
+
 use std::path::PathBuf;
 
 use serde::Deserialize;

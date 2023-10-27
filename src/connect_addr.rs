@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+/// This type represents both tcp and unix socket connections in simple enum.
 #[derive(Deserialize, Debug, Clone)]
-// #[serde(untagged)]
 pub enum ConnectAddr {
     #[serde(rename = "unix")]
     Unix(PathBuf),

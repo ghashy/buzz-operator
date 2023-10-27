@@ -1,3 +1,4 @@
+/// Error type for [`ServiceBunch`](crate::service::service_bunch::ServiceBunch)
 #[derive(Debug)]
 pub enum ServiceBunchError {
     FailedCreateAddress(std::io::Error),
