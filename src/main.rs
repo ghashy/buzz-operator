@@ -1,7 +1,7 @@
-use sman::bunch_controller::BunchController;
+use buzz_operator::bunch_controller::BunchController;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 
-use sman::configuration;
+use buzz_operator::configuration;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
@@ -20,7 +20,7 @@ fn init_tracing_subscriber() {
     if !app_conf.log_dir.exists() {
         std::fs::DirBuilder::new()
             .create(&app_conf.log_dir)
-            .expect("Failed to create sman's log directory!");
+            .expect("Failed to create buzzoperator's log directory!");
     }
 
     let subscriber = tracing_subscriber::fmt()
@@ -33,7 +33,7 @@ fn init_tracing_subscriber() {
                     .create(true)
                     .append(true)
                     .write(true)
-                    .open(app_conf.log_dir.join("sman.log"))
+                    .open(app_conf.log_dir.join("buzzoperator.log"))
                     .expect("Can't open log file!"),
             ),
         );

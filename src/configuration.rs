@@ -68,7 +68,7 @@ impl Configuration {
     pub fn load_configuration() -> Result<Configuration, config::ConfigError> {
         // Initialise our configuration reader
         let settings = config::Config::builder()
-            .add_source(config::File::with_name("sman.yaml"))
+            .add_source(config::File::with_name("buzzoperator.yaml"))
             .build()?;
 
         settings.try_deserialize()

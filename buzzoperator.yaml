@@ -21,6 +21,6 @@ services:
     fails_limit: 5
     
     
-    app_dir: "/Users/ghashy/Dev/Rust/crates/sman/test_app/exec_dir"
-    log_dir: "/Users/ghashy/Dev/Rust/crates/sman/test_app/exec_dir"
+    app_dir: "/Users/ghashy/Dev/Rust/crates/buzz-operator/test_app/exec_dir"
+    log_dir: "/Users/ghashy/Dev/Rust/crates/buzz-operator/test_app/exec_dir"
 ...

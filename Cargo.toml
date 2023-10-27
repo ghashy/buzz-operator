@@ -1,12 +1,12 @@
 [package]
-name = "sman"
+name = "buzz-operator"
 authors = ["ghashy <obsidian.musicwork@gmail.com>"]
 version = "0.1.0"
 edition = "2021"
 description = "Automate deployment, rolling updating, health checking, etc."
 
 [[bin]]
-name = "sman"
+name = "buzzoperator"
 path = "src/main.rs"
 
 [dependencies]
@@ -43,5 +43,5 @@ extended-description = "Here will be extended description."
 section = "admin"
 priority = "optional"
 maintainer-scripts = "debian/scripts"
-systemd-units = { enable = true, unit-scripts = "debian/unit-scripts", unit-name = "sman" }
-assets = [["target/release/sman", "usr/bin/sman", "755"]]
+systemd-units = { enable = true, unit-scripts = "debian/unit-scripts", unit-name = "buzzoperator" }
+assets = [["target/release/buzzoperator", "usr/bin/buzzoperator", "755"]]

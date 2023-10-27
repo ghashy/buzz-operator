@@ -1,11 +1,11 @@
 [Unit]
-AssertPathExists=/usr/bin/sman
+AssertPathExists=/usr/bin/buzzoperator
 
 [Service]
 # Customise later
 User=ghashy
 WorkingDirectory=~
-ExecStart=/usr/bin/sman
+ExecStart=/usr/bin/buzzoperator
 Restart=always
 PrivateTmp=true
 NoNewPrivileges=true
