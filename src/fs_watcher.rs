@@ -9,22 +9,33 @@ use notify::{Event, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
-/// Type for listening events from filesystem. Provide us with possibility to
-/// detect new binary file upload event.
+/// Type for listening events from filesystem. Provides us with the possibility
+/// to detect new binary file creation event.
+/// WARN: Sends only `create` notifications, all other skipped,
+/// but printed in logs.
 pub struct FileSystemWatcher {
     watcher: RecommendedWatcher,
-    pub receiver: mpsc::Receiver<Result<notify::Event>>,
+    pub receiver: mpsc::Receiver<Event>,
 }
 
 impl FileSystemWatcher {
     pub fn new(paths: &[&Path]) -> FileSystemWatcher {
         let (tx, rx) = mpsc::channel(100);
 
-        let mut watcher = notify::recommended_watcher(move |res| {
-            tx.blocking_send(res)
-                .expect("Failed to send filesystem notification");
-        })
-        .unwrap();
+        let mut watcher =
+            notify::recommended_watcher(move |res: Result<Event>| {
+                if let Ok(event) = res {
+                    match event.kind {
+                        notify::EventKind::Create(_) => {
+                            tx.blocking_send(event).expect(
+                                "Failed to send filesystem notification",
+                            );
+                        }
+                        _ => tracing::trace!("FS EVENT: {:?}", event),
+                    }
+                }
+            })
+            .unwrap();
 
         for &path in paths.iter() {
             watcher.watch(path, RecursiveMode::NonRecursive).unwrap();

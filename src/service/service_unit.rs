@@ -7,6 +7,11 @@ use crate::connect_addr::ConnectAddr;
 
 use super::Service;
 
+pub enum UnitVersion {
+    Stable,
+    New,
+}
+
 pub(super) type ProcessID = u32;
 
 /// Error type for `ServiceUnit`
@@ -56,10 +61,13 @@ impl ServiceUnit {
     /// Create a new `ServiceUnit`. At this point `ServiceUnit` is not ran.
     /// To run `ServiceUnit`, you should call `run_and_wait` function.
     /// WARN: addres should not be taken from conf!
+    ///
+    /// `version` - spawn stable binary version or new.
     pub fn new(
         config: &ServiceConfig,
         address: &ConnectAddr,
         term_rx: mpsc::Receiver<()>,
+        version: UnitVersion,
     ) -> std::result::Result<ServiceUnit, std::io::Error> {
         // Make sure log directory exists
         if !config.get_log_dir().exists() {
@@ -75,8 +83,10 @@ impl ServiceUnit {
             );
         }
 
-        let mut command =
-            Command::new(&config.app_dir.join(&config.stable_exec_name));
+        let mut command = Command::new(&config.app_dir.join(match version {
+            UnitVersion::Stable => &config.stable_exec_name,
+            UnitVersion::New => &config.new_exec_name,
+        }));
         // We run our process in `app_dir` from provided config
         command.current_dir(&config.app_dir);
 

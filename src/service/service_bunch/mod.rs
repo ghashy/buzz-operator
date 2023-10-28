@@ -9,7 +9,9 @@ use tokio::task::JoinSet;
 use crate::configuration::ServiceConfig;
 use crate::connect_addr::ConnectAddr;
 
-use super::service_unit::{ProcessID, ServiceUnit, ServiceUnitError};
+use super::service_unit::{
+    ProcessID, ServiceUnit, ServiceUnitError, UnitVersion,
+};
 use super::unit_connection::UnitConnection;
 use super::Service;
 
@@ -170,7 +172,7 @@ impl ServiceBunch {
                         .get_single_address()
                         .expect("Can't get single address");
                     let (term_tx, pid) = self
-                        .spawn_unit_service(&address)
+                        .spawn_unit_service(&address, UnitVersion::Stable)
                         .expect("Can't spawn unit service");
                     self.stable_connections.push(UnitConnection::new(
                         term_tx,
@@ -205,15 +207,20 @@ impl ServiceBunch {
     async fn start_update(&mut self) -> Result<(), ServiceBunchError> {
         self.state.update(state_machine::Event::UpdateRequest);
 
+        tracing::info!(
+            "Starting rolling update in service `{}`",
+            self.config.name,
+        );
         while !self.stable_connections.is_empty()
             && self.state.is(state_machine::State::Updating)
         {
             let address = self.get_single_address()?;
 
-            let (term_tx, pid) = match self.spawn_unit_service(&address) {
-                Ok(value) => value,
-                Err(value) => return value,
-            };
+            let (term_tx, pid) =
+                match self.spawn_unit_service(&address, UnitVersion::New) {
+                    Ok(value) => value,
+                    Err(e) => return Err(e),
+                };
 
             self.new_connections.push(UnitConnection::new(
                 term_tx,
@@ -224,10 +231,14 @@ impl ServiceBunch {
             // TODO: compute update time with config's setting in mind.
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
+            tracing::info!(
+                "Pop one stable connection from store and terminate it"
+            );
             let connection = self.stable_connections.pop().unwrap();
             connection.terminate().await.unwrap();
 
             if !self.state.is(state_machine::State::Updating) {
+                tracing::warn!("Exited from `Updating` state, terminating all new processes");
                 for process in self.new_connections.iter() {
                     let _ = process.terminate().await;
                 }
@@ -261,17 +272,18 @@ impl ServiceBunch {
     fn spawn_unit_service(
         &mut self,
         address: &ConnectAddr,
-    ) -> Result<(mpsc::Sender<()>, u32), Result<(), ServiceBunchError>> {
+        version: UnitVersion,
+    ) -> Result<(mpsc::Sender<()>, ProcessID), ServiceBunchError> {
         let (term_tx, term_rx) = tokio::sync::mpsc::channel(100);
         let mut service =
-            ServiceUnit::new(&self.config, address, term_rx).unwrap();
+            ServiceUnit::new(&self.config, address, term_rx, version).unwrap();
         let pid = match service.run() {
             Ok(pid) => pid,
             Err(e) => {
                 tracing::error!("Failed to start ServiceUnit with: {}", e);
                 self.state.update(state_machine::Event::StopRequest);
                 let _ = self.terminate();
-                return Err(Err(ServiceBunchError::FailedToStart));
+                return Err(ServiceBunchError::FailedToStart);
             }
         };
         self.join_set.spawn(async move { service.wait_on().await });
@@ -282,7 +294,7 @@ impl ServiceBunch {
 
 #[async_trait]
 impl Service<ServiceBunchError> for ServiceBunch {
-    type Output = ();
+    type Output = Vec<ConnectAddr>;
 
     async fn wait_on(&mut self) -> Result<(), ServiceBunchError> {
         // Wait on child processes execution
@@ -312,8 +324,7 @@ impl Service<ServiceBunchError> for ServiceBunch {
                             match message {
                                 message::Message::StartUpdate => {
                                     match self.start_update().await {
-                                        Ok(_) => {
-                                        },
+                                        Ok(_) => {},
                                         Err(e) => tracing::error!("{}", e),
                                     }
                                 }
@@ -344,10 +355,11 @@ impl Service<ServiceBunchError> for ServiceBunch {
         .map_err(|e| ServiceBunchError::FailedCreateAddress(e))?;
 
         for address in addresses.iter() {
-            let (term_tx, pid) = match self.spawn_unit_service(address) {
-                Ok(value) => value,
-                Err(value) => return value,
-            };
+            let (term_tx, pid) =
+                match self.spawn_unit_service(address, UnitVersion::Stable) {
+                    Ok(value) => value,
+                    Err(e) => return Err(e),
+                };
 
             self.stable_connections.push(UnitConnection::new(
                 term_tx,
@@ -356,7 +368,11 @@ impl Service<ServiceBunchError> for ServiceBunch {
             ));
         }
         self.state.update(state_machine::Event::ServicesEstablished);
-        Ok(())
+        Ok(self
+            .stable_connections
+            .iter()
+            .map(|conn| conn.addr().clone())
+            .collect())
     }
 }
 

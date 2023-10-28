@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinSet;
@@ -15,9 +16,38 @@ struct BunchConnection {
     tx: Sender<Message>,
 }
 
+/// High level abstraction above [`ServiceBunch`]. Runs all bunchs, listens for
+/// filesystem notifications, generates rolling update requests, provides single
+/// interface to all backend bunches.
+///
+/// For communication with bunches we create (tx, rx) pairs with
+/// [`tokio::sync::mpsc::channel`] and share them
+/// between `BunchController` and every of controlled bunch.
+/// ```
+///                   +--------------------+
+///                   |  BunchController   |
+///                   +--------------------+
+///                   |  tx, tx, tx, tx    |
+///                -->|        rx          |<--
+///               /   +-------↑------------+  /
+///              /            |              /
+///             /             |             /
+///            /        (tx, rx)           /
+///           /           tx.clone()      /
+///         (tx, rx)     /     \          (tx, rx)
+///               |     /       \               |
+///        |-------    /         \       |-------
+/// +------v----------v--+ +------v------v------+
+/// |   ServiceBunch 1   | |   ServiceBunch 2   |
+/// +--------------------+ +--------------------+
+/// |       tx, rx       | |      tx, rx        |
+/// +--------------------+ +--------------------+
+/// ```
 pub struct BunchController {
+    /// Handle to notification system
     fs_watcher: FileSystemWatcher,
     bunch_connections: Vec<BunchConnection>,
+    // WARN: after `run()` call bunches are emtpy. We move all to the `bunches_join` execution.
     bunches: Vec<ServiceBunch>,
     bunches_join: JoinSet<Result<(), ServiceBunchError>>,
     message_receiver: Receiver<Message>,
@@ -57,15 +87,20 @@ impl BunchController {
     }
 
     pub async fn run(&mut self) {
-        for mut bunch in self.bunches.drain(..).into_iter() {
+        // Take ownership over `bunches` vec.
+        let bunches = std::mem::replace(&mut self.bunches, Vec::new());
+        // Spawn all bunches tasks in the `bunches_join`
+        for mut bunch in bunches.into_iter() {
             match bunch.run() {
-                Ok(_) => {}
+                Ok(addrs) => {
+                    self.run_update_script(Some(addrs), None);
+                }
                 Err(e) => tracing::error!("Can't run bunch, {}", e),
             }
             self.bunches_join
                 .spawn(async move { bunch.wait_on().await });
         }
-        // TODO we shoud track all current addresses
+
         loop {
             tokio::select! {
                 // Wait bunches executing
@@ -84,16 +119,16 @@ impl BunchController {
                         Some(message) => {
                             match message {
                                 Message::ServiceSpawned(addr) => {
-                                    self.run_script(Some(vec![addr]), None).await;
+                                    self.run_update_script(Some(vec![addr]), None);
                                 }
+                                Message::ServiceDespawned(old) => {
+                                    self.run_update_script(None, Some(old));
+                                },
                                 Message::ServiceReplaced { old, new } => {
-                                    self.run_script(Some(vec![new]), Some(vec![old])).await;
+                                    self.run_update_script(Some(vec![new]), Some(vec![old]));
                                 },
                                 Message::UpdateFail { old, new} => {
-                                    self.run_script(Some(new), Some(old)).await;
-                                },
-                                Message::ServiceDespawned(old) => {
-                                    self.run_script(None, Some(old)).await;
+                                    self.run_update_script(Some(new), Some(old));
                                 },
                                 _ => unreachable!(),
                             }
@@ -108,16 +143,12 @@ impl BunchController {
                 watch = self.fs_watcher.receiver.recv() => {
                     match watch {
                         // Handle path event
-                        Some(Ok(event)) => {
-                            let paths = event.paths
-                            .iter()
-                            .map(|path| path.to_string_lossy())
-                            .collect::<String>();
-                            println!("FS EVENT: {}", paths);
+                        Some(event) => {
+                            for path in event.paths.iter().collect::<HashSet<_>>() {
+                                tracing::info!("File created: {}", path.display());
+                                self.send_update_message(path).await;
+                            }
                         },
-                        Some(Err(e)) => {
-                            tracing::error!("{}", e);
-                        }
                         // Filesystem watcher will not exit
                         None => unreachable!(),
                     }
@@ -126,11 +157,38 @@ impl BunchController {
         }
     }
 
-    async fn run_script(
+    async fn send_update_message(&self, path: &PathBuf) {
+        // If there are service which have this app_dir path and new_exec_name
+        if let Some(service) = self.config.services.iter().find(|service| {
+            service.app_dir.join(&service.new_exec_name).eq(path)
+        }) {
+            // If there are connection to this service
+            if let Some(connection) = self
+                .bunch_connections
+                .iter()
+                .find(|conn| conn.name == service.name)
+            {
+                tracing::info!(
+                    "Trying to send update request to {} service",
+                    service.name
+                );
+                // Send a message
+                if let Err(e) = connection.tx.send(Message::StartUpdate).await {
+                    tracing::error!("Failed to send message from BunchController to {} service: {}", service.name, e);
+                }
+            }
+        }
+    }
+
+    fn run_update_script(
         &self,
-        new: Option<Vec<ConnectAddr>>,
-        old: Option<Vec<ConnectAddr>>,
-    ) -> bool {
+        to_add: Option<Vec<ConnectAddr>>,
+        to_remove: Option<Vec<ConnectAddr>>,
+    ) {
+        tracing::info!("UPDATE SCRIPT RAN");
+    }
+
+    async fn run_health_check_script() -> bool {
         todo!()
     }
 }

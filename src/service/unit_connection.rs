@@ -1,11 +1,11 @@
-use tokio::{
-    sync::mpsc::{self, error::SendError},
-    time::Instant,
-};
+use tokio::sync::mpsc::{self, error::SendError};
 
 use super::service_unit::ProcessID;
-use crate::connect_addr::{self, ConnectAddr};
+use crate::connect_addr::ConnectAddr;
 
+/// Stores pid, address information and
+/// [temination_sender](`UnitConnection::termination_sender`) to single child
+/// process.
 #[derive(Clone)]
 pub(super) struct UnitConnection {
     termination_sender: mpsc::Sender<()>,
@@ -29,7 +29,7 @@ impl UnitConnection {
         self.pid
     }
     pub(super) async fn terminate(&self) -> Result<(), SendError<()>> {
-        self.termination_sender.blocking_send(())
+        self.termination_sender.send(()).await
     }
     pub(super) fn addr(&self) -> &ConnectAddr {
         &self.connect_addr
