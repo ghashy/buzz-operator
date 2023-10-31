@@ -8,6 +8,7 @@ async fn main() {
     init_tracing_subscriber();
 
     let config = configuration::Configuration::load_configuration().unwrap();
+    dbg!(&config);
 
     let mut controller = BunchController::new(config);
     controller.run().await;
@@ -37,6 +38,5 @@ fn init_tracing_subscriber() {
                     .expect("Can't open log file!"),
             ),
         );
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set up tracing");
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set up tracing");
 }

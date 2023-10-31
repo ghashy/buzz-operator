@@ -15,3 +15,5 @@ Planned stuff:
 7. Basic command-line interface (CLI): Create a simple command-line interface that allows users to interact with your tool and perform actions like registering services, starting/stopping services, and checking service status.
 
 8. Error handling and user feedback: Implement proper error handling to provide meaningful error messages and feedback to users when they encounter issues or invalid inputs.
+
+WILL NOT WORK ON MACOS BECAUSE OF A BUG from `notify` crate, with `FSEvent API` 
