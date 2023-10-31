@@ -24,6 +24,7 @@ impl FileSystemWatcher {
 
         let mut watcher =
             notify::recommended_watcher(move |res: Result<Event>| {
+                tracing::info!("{:?}", res);
                 if let Ok(event) = res {
                     match event.kind {
                         notify::EventKind::Create(_) => {

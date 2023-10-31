@@ -11,6 +11,10 @@ use crate::service::service_bunch::message::Message;
 use crate::service::service_bunch::{ServiceBunch, ServiceBunchError};
 use crate::service::Service;
 
+// TODO: implement healthchecks
+// Create separate module, and give tx, and addresses, and config params with
+// healthchecks. It will check and send
+
 struct BunchConnection {
     name: String,
     tx: Sender<Message>,
@@ -23,7 +27,7 @@ struct BunchConnection {
 /// For communication with bunches we create (tx, rx) pairs with
 /// [`tokio::sync::mpsc::channel`] and share them
 /// between `BunchController` and every of controlled bunch.
-/// ```
+/// ```text
 ///                   +--------------------+
 ///                   |  BunchController   |
 ///                   +--------------------+
@@ -92,9 +96,7 @@ impl BunchController {
         // Spawn all bunches tasks in the `bunches_join`
         for mut bunch in bunches.into_iter() {
             match bunch.run() {
-                Ok(addrs) => {
-                    self.run_update_script(Some(addrs), None);
-                }
+                Ok(_) => (),
                 Err(e) => tracing::error!("Can't run bunch, {}", e),
             }
             self.bunches_join
@@ -118,13 +120,19 @@ impl BunchController {
                     match rx_join {
                         Some(message) => {
                             match message {
-                                Message::ServiceSpawned(addr) => {
+                                Message::UnitSpawned(addr) => {
                                     self.run_update_script(Some(vec![addr]), None);
                                 }
-                                Message::ServiceDespawned(old) => {
+                                Message::UnitsSpawned(addr) => {
+                                    self.run_update_script(Some(addr), None);
+                                }
+                                Message::UnitDespawned(old) => {
+                                    self.run_update_script(None, Some(vec![old]));
+                                }
+                                Message::UnitsDespawned(old) => {
                                     self.run_update_script(None, Some(old));
                                 },
-                                Message::ServiceReplaced { old, new } => {
+                                Message::UnitReplaced { old, new } => {
                                     self.run_update_script(Some(vec![new]), Some(vec![old]));
                                 },
                                 Message::UpdateFail { old, new} => {
@@ -186,6 +194,8 @@ impl BunchController {
         to_remove: Option<Vec<ConnectAddr>>,
     ) {
         tracing::info!("UPDATE SCRIPT RAN");
+        println!("{:?}", to_add);
+        println!("{:?}", to_remove);
     }
 
     async fn run_health_check_script() -> bool {

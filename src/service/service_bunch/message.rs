@@ -6,9 +6,14 @@ pub enum Message {
     // From controller
     StartUpdate,
     Shutdown,
+    // From HealthCheck module
+    HealthCheckFailed(ConnectAddr),
     // To Controller
-    ServiceSpawned(ConnectAddr),
-    ServiceReplaced {
+    UnitSpawned(ConnectAddr),
+    UnitsSpawned(Vec<ConnectAddr>),
+    UnitDespawned(ConnectAddr),
+    UnitsDespawned(Vec<ConnectAddr>),
+    UnitReplaced {
         old: ConnectAddr,
         new: ConnectAddr,
     },
@@ -16,5 +21,4 @@ pub enum Message {
         old: Vec<ConnectAddr>,
         new: Vec<ConnectAddr>,
     },
-    ServiceDespawned(Vec<ConnectAddr>),
 }

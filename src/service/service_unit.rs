@@ -69,24 +69,11 @@ impl ServiceUnit {
         term_rx: mpsc::Receiver<()>,
         version: UnitVersion,
     ) -> std::result::Result<ServiceUnit, std::io::Error> {
-        // Make sure log directory exists
-        if !config.get_log_dir().exists() {
-            std::fs::DirBuilder::new()
-                .create(config.get_log_dir())
-                .expect(&format!(
-                    "Failed to create '{}' service log directory!",
-                    config.name
-                ));
-            tracing::info!(
-                "Created log directory: {}",
-                config.get_log_dir().display()
-            );
-        }
-
         let mut command = Command::new(&config.app_dir.join(match version {
             UnitVersion::Stable => &config.stable_exec_name,
             UnitVersion::New => &config.new_exec_name,
         }));
+
         // We run our process in `app_dir` from provided config
         command.current_dir(&config.app_dir);
 
@@ -119,7 +106,7 @@ impl ServiceUnit {
     }
 
     /// Currently, this app don't support custom termination signals.
-    /// We terminate process in any case. Firstly we try to terminate it gently,
+    /// We terminate process in any case. At first we try to terminate it gently,
     /// and then if it didn't work we send [libc::SIGKILL].
     fn terminate(&self) {
         let pid = self.id.unwrap() as i32;

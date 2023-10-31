@@ -1,3 +1,9 @@
+//! Sends message to [`crate::bunch_controller::BunchController`] in functions:
+//! - [`ServiceBunch::terminate`]
+//! - [`ServiceBunch::handle_service_unit_error`]
+//! - [`ServiceBunch::start_update`]
+//! - [`<ServiceBunch as Service>::run`]
+
 use std::mem::swap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -27,7 +33,7 @@ mod state_machine;
 ///
 /// `ServiceBunch` can run one or more instances of a service, restart
 /// these instances on failure, count failures and when certain threshold of
-/// failures count is exceeded, terminates itself.
+/// failures count is exceeded, it terminates itself.
 /// Also `ServiceBunch` has possibility to perform rolling updates, when it
 /// gets a signal over the [`self.controller_rx`](ServiceBunch::controller_rx)
 /// channel.
@@ -47,11 +53,6 @@ pub struct ServiceBunch {
 
     /// Connection to higher (in program hierachy) type. Input.
     controller_rx: Receiver<Message>,
-
-    // TODO: send messages to the parent during working. Parent should get such
-    // information as:
-    // Children process is despawned, its address.
-    // New process is spawned, its addres.
     /// Connection to higher (in program hierachy) type. Output.
     controller_tx: Sender<Message>,
 
@@ -65,6 +66,20 @@ impl ServiceBunch {
         controller_rx: Receiver<Message>,
         controller_tx: Sender<Message>,
     ) -> ServiceBunch {
+        // Make sure log directory exists
+        if !config.get_log_dir().exists() {
+            std::fs::DirBuilder::new()
+                .create(config.get_log_dir())
+                .expect(&format!(
+                    "Failed to create '{}' service log directory!",
+                    config.name
+                ));
+            tracing::info!(
+                "Created log directory: {}",
+                config.get_log_dir().display()
+            );
+        }
+
         let capacity = config.instances_count as usize;
         ServiceBunch {
             config,
@@ -167,7 +182,6 @@ impl ServiceBunch {
                     }
                 } else {
                     // Restart service
-                    self.stable_connections.retain(|c| c.get_pid() != id);
                     let address = self
                         .get_single_address()
                         .expect("Can't get single address");
@@ -179,6 +193,23 @@ impl ServiceBunch {
                         pid,
                         address.clone(),
                     ));
+                    // Send message to controller
+                    if let Some(lost_connection) =
+                        take_from_vec_with_pid(&mut self.stable_connections, id)
+                    {
+                        let tx = self.controller_tx.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = tx
+                                .send(Message::UnitReplaced {
+                                    old: lost_connection.addr().clone(),
+                                    new: address,
+                                })
+                                .await
+                            {
+                                tracing::error!("{}", e);
+                            }
+                        });
+                    }
                 }
             }
             _ => {}
@@ -191,11 +222,27 @@ impl ServiceBunch {
     /// type.
     fn terminate(&mut self) {
         self.state.update(state_machine::Event::StopRequest);
-        self.stable_connections.iter().for_each(|service| {
-            // Ignore any send errors, as the receiver may have already been dropped
-            let _ = service.terminate();
+        // Clear `self.stable_connections`
+        let connections =
+            std::mem::replace(&mut self.stable_connections, Vec::new());
+
+        let tx = self.controller_tx.clone();
+        // Do stuff in async context
+        tokio::spawn(async move {
+            // Addresses for sending to controller
+            let addrs =
+                connections.iter().map(|conn| conn.addr().clone()).collect();
+            // Despawn all child processes
+            for service in connections.into_iter() {
+                // Ignore any send errors, as the receiver may have already been dropped
+                let _ = service.terminate().await;
+            }
+
+            // Send message
+            if let Err(e) = tx.send(Message::UnitsDespawned(addrs)).await {
+                tracing::error!("{}", e);
+            }
         });
-        self.stable_connections.clear();
     }
 
     /// How it works:
@@ -228,6 +275,15 @@ impl ServiceBunch {
                 address.clone(),
             ));
 
+            // Send message to controller
+            let tx = self.controller_tx.clone();
+            let send_addr = address.clone();
+            tokio::spawn(async move {
+                if let Err(e) = tx.send(Message::UnitSpawned(send_addr)).await {
+                    tracing::error!("{}", e);
+                }
+            });
+
             // TODO: compute update time with config's setting in mind.
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -236,6 +292,14 @@ impl ServiceBunch {
             );
             let connection = self.stable_connections.pop().unwrap();
             connection.terminate().await.unwrap();
+
+            // Send message to controller
+            let tx = self.controller_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = tx.send(Message::UnitDespawned(address)).await {
+                    tracing::error!("{}", e);
+                }
+            });
 
             if !self.state.is(state_machine::State::Updating) {
                 tracing::warn!("Exited from `Updating` state, terminating all new processes");
@@ -303,9 +367,6 @@ impl Service<ServiceBunchError> for ServiceBunch {
                 join = self.join_set.join_next() => {
                     // Some service finished
                     match join {
-                        Some(Ok(Ok(()))) => {
-                            tracing::info!("Some unit service exited wit 0 code")
-                        }
                         Some(Ok(Err(serv_err))) => {
                             self.handle_service_unit_error(serv_err);
                         }
@@ -316,6 +377,11 @@ impl Service<ServiceBunchError> for ServiceBunch {
                         },
                         // HINT: This is a normal loop exit point
                         None => return Ok(()),
+
+                        // Exit with 0 only in rolling update mode
+                        Some(Ok(Ok(()))) => {
+                            tracing::info!("SOME PROCESS EXITED WITH 0 CODE");
+                        }
                     }
                 }
                 notify = self.controller_rx.recv() => {
@@ -327,6 +393,11 @@ impl Service<ServiceBunchError> for ServiceBunch {
                                         Ok(_) => {},
                                         Err(e) => tracing::error!("{}", e),
                                     }
+                                }
+                                message::Message::HealthCheckFailed(addr) => {
+                                    // TODO: Check who failed, if update, stop update,
+                                    // if certain pid, count failures, and restart it
+                                    // self.state.update(state_machine::Event::UpdatingFailed);
                                 }
                                 message:: Message::Shutdown => {
                                     let _ = self.terminate();
@@ -367,12 +438,37 @@ impl Service<ServiceBunchError> for ServiceBunch {
                 address.clone(),
             ));
         }
+
+        // Send message to controller
+        let tx = self.controller_tx.clone();
+        let addrs = self
+            .stable_connections
+            .iter()
+            .map(|conn| conn.addr().clone())
+            .collect();
+        tokio::spawn(async move {
+            // Addresses for sending to controller
+            if let Err(e) = tx.send(Message::UnitsSpawned(addrs)).await {
+                tracing::error!("{}", e);
+            }
+        });
+
         self.state.update(state_machine::Event::ServicesEstablished);
         Ok(self
             .stable_connections
             .iter()
             .map(|conn| conn.addr().clone())
             .collect())
+    }
+}
+
+fn take_from_vec_with_pid(
+    vector: &mut Vec<UnitConnection>,
+    pid: ProcessID,
+) -> Option<UnitConnection> {
+    match vector.iter().position(|conn| conn.get_pid() == pid) {
+        Some(pos) => Some(vector.remove(pos)),
+        None => None,
     }
 }
 
