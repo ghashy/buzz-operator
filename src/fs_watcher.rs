@@ -22,21 +22,18 @@ impl FileSystemWatcher {
     pub fn new(paths: &[&Path]) -> FileSystemWatcher {
         let (tx, rx) = mpsc::channel(100);
 
-        let mut watcher =
-            notify::recommended_watcher(move |res: Result<Event>| {
-                tracing::info!("{:?}", res);
-                if let Ok(event) = res {
-                    match event.kind {
-                        notify::EventKind::Create(_) => {
-                            tx.blocking_send(event).expect(
-                                "Failed to send filesystem notification",
-                            );
-                        }
-                        _ => tracing::trace!("FS EVENT: {:?}", event),
+        let mut watcher = notify::recommended_watcher(move |res: Result<Event>| {
+            if let Ok(event) = res {
+                match event.kind {
+                    notify::EventKind::Create(_) => {
+                        tx.blocking_send(event)
+                            .expect("Failed to send filesystem notification");
                     }
+                    _ => tracing::trace!("FS EVENT: {:?}", event),
                 }
-            })
-            .unwrap();
+            }
+        })
+        .unwrap();
 
         for &path in paths.iter() {
             watcher.watch(path, RecursiveMode::NonRecursive).unwrap();

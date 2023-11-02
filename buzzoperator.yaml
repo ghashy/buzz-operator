@@ -21,6 +21,7 @@ services:
     fails_limit: 5
     
     
-    app_dir: "/home/ghashy/crates/buzz-operator/test_app/exec_dir"
-    log_dir: "/home/ghashy/crates/buzz-operator/test_app/log_dir"
+    update_script: "/home/ghashy/dev/crates/buzz-operator/test_app/update"
+    app_dir: "/home/ghashy/dev/crates/buzz-operator/test_app/exec_dir"
+    log_dir: "/home/ghashy/dev/crates/buzz-operator/test_app/log_dir"
 ...

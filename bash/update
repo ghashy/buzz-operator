@@ -1,4 +1,74 @@
-#!/usr/bin/env bash
+#!/bin/bash -x
 
-SCRIPT_NAME="update_script"
+# Define the paths to the nginx configuration file and the temporary file
+nginx_conf="$HOME/nginx.conf"
+temp_conf="$HOME/nginx_temp.conf"
+temp_conf2="$HOME/nginx_temp2.conf"
+
+# Function to add backend servers to nginx configuration
+add_servers() {
+  local addresses=("$@")
+
+  # Create a temporary file with the new server addresses
+  echo "upstream ghashy_backend {" > "$temp_conf"
+  for address in "${addresses[@]}"; do
+    echo " server $address;" >> "$temp_conf"
+  done
+  echo "}" >> "$temp_conf"
+
+  # Merge the temporary upstream block with the existing nginx.conf
+  awk '/upstream ghashy_backend {/,/}/ { next } { print }' "$nginx_conf" > "$temp_conf2"
+  cat "$temp_conf" >> "$temp_conf2"
+  mv "$temp_conf2" "$nginx_conf"
+}
+
+# Function to remove backend servers from nginx configuration
+remove_servers() {
+  for server in "$@"; do
+    echo "Removing server: $server"
+    local addresses=("$@")
+
+    # Remove addresses from the configuration
+    for address in "${addresses[@]}"; do
+        sed -i "/$address;/d" "$nginx_conf"
+    done
+  done
+}
+
+# Transform long options to short ones
+for arg in "$@"; do
+  shift
+  case "$arg" in
+    '--add')   set -- "$@" '-a'   ;;
+    '--remove') set -- "$@" '-r'   ;;
+    *)          set -- "$@" "$arg" ;;
+  esac
+done
+
+while getopts "a:r:" opt; do 
+  case ${opt} in
+    a)
+      addresses_to_add=()
+      shift $((OPTIND-1))
+      while [[ $# -gt 0 && $1 != --* ]]; do
+        addresses_to_add+=("$1")
+        shift
+      done
+      add_servers "${addresses_to_add[@]}"
+      ;;
+    r)
+      addresses_to_remove=()
+      while [[ $OPTARG != --* ]]; do
+        addresses_to_remove+=("$OPTARG")
+        shift
+      done
+      remove_servers "${addresses_to_remove[@]}"
+      ;;
+    *)
+      echo "Failed"
+  esac
+done
+
+# Restart nginx to apply the changes
+service nginx restart
 

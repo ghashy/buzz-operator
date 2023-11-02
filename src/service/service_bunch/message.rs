@@ -9,16 +9,19 @@ pub enum Message {
     // From HealthCheck module
     HealthCheckFailed(ConnectAddr),
     // To Controller
-    UnitSpawned(ConnectAddr),
-    UnitsSpawned(Vec<ConnectAddr>),
-    UnitDespawned(ConnectAddr),
-    UnitsDespawned(Vec<ConnectAddr>),
+    UnitSpawned(String, ConnectAddr),
+    UnitsSpawned(String, Vec<ConnectAddr>),
+    UnitDespawned(String, ConnectAddr),
+    UnitsDespawned(String, Vec<ConnectAddr>),
     UnitReplaced {
+        name: String,
         old: ConnectAddr,
         new: ConnectAddr,
     },
     UpdateFail {
+        name: String,
         old: Vec<ConnectAddr>,
         new: Vec<ConnectAddr>,
     },
+    UpdateFinished(String),
 }

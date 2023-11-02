@@ -39,6 +39,8 @@ pub struct ServiceConfig {
 }
 
 impl ServiceConfig {
+    /// If `log_dir` param not set, `log` directory create automatically in the
+    /// app directory
     pub fn get_log_dir(&self) -> PathBuf {
         self.log_dir
             .clone()
