@@ -1,0 +1,70 @@
+#!/bin/bash
+
+# Define the paths to the nginx configuration file and the temporary file
+nginx_conf="$HOME/a/nginx.conf"
+backend_name="ghashy_backend"
+
+# Function to add backend servers to nginx configuration
+add_servers() {
+    for address in "${add_arr[@]}"; do
+    awk -v backend_name="$backend_name" -v address="$address" '
+        /upstream/ && $2 == backend_name {
+            f = 1
+        }
+        f && $1 == "server" && $2 == address ";" {
+            found = 1
+        }
+        f && /.*}/ {
+            if (!found) {
+                printf("\t\tserver %s;\n", address)
+                found = 1
+            }
+            f = 0
+        }
+        { print }
+    ' "$nginx_conf" > temp.conf && mv temp.conf "$nginx_conf"
+    echo "Adding $address"
+    done
+}
+
+# Function to remove backend servers from nginx configuration
+remove_servers() {
+    for address in "${rem_arr[@]}"; do
+    sed -i -e "/^\s*server $address;/d" "$nginx_conf"
+    echo "removing $address"
+    done
+}
+
+add_arr=()
+rem_arr=()
+
+while [[ -n "$1" ]]; do
+    case "$1" in
+        --add)
+            while [[ "$2" != --* && -n "$2" ]]; do
+                add_arr+=("$2")
+                shift
+            done
+            shift
+            ;;
+        --remove)
+            while [[ "$2" != --* && -n "$2"  ]]; do
+                rem_arr+=("$2")
+                shift
+            done
+            shift
+            ;;
+        *)
+            echo "Star"
+            break
+            ;;
+    esac
+done
+
+add_servers
+remove_servers
+
+# Restart nginx to apply the changes
+# service nginx restart
+
+
