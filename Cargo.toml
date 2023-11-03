@@ -13,10 +13,6 @@ path = "src/main.rs"
 name = "nginx-update"
 path = "src/bin/nginx-update.rs"
 
-[[bin]]
-name = "nginx-update-2"
-path = "src/bin/nginx-update-2.rs"
-
 [dependencies]
 libc = "0.2.149"
 async-trait = "0.1.74"
