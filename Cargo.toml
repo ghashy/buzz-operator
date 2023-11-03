@@ -9,6 +9,10 @@ description = "Automate deployment, rolling updating, health checking, etc."
 name = "buzzoperator"
 path = "src/main.rs"
 
+[[bin]]
+name = "update"
+path = "src/bin/update.rs"
+
 [dependencies]
 libc = "0.2.149"
 async-trait = "0.1.74"
@@ -27,6 +31,7 @@ config = "0.13.3"
 notify = "6.1.1"
 serde = { version = "1.0.186", features = ["derive"] }
 chrono = "0.4.26"
+clap = { version = "4.4.7", features = ["derive"] }
 
 [dev-dependencies]
 # tokio-test = "0.4.3"
