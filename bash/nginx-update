@@ -1,10 +1,13 @@
 #!/bin/bash
 
-# Define the paths to the nginx configuration file and the temporary file
-nginx_conf="$HOME/a/nginx.conf"
-backend_name="ghashy_backend"
+# TESTED ON LINUX ONLY! (debian)
 
-# Function to add backend servers to nginx configuration
+# Define the paths to the nginx configuration file and the temporary file
+nginx_conf="/etc/nginx/nginx.conf"
+backend_name="my_backend"
+
+# Function to add backend servers to nginx configuration, avoids inserting if
+# address is already present
 add_servers() {
     for address in "${add_arr[@]}"; do
     awk -v backend_name="$backend_name" -v address="$address" '
@@ -55,16 +58,28 @@ while [[ -n "$1" ]]; do
             shift
             ;;
         *)
-            echo "Star"
+            echo "star"
             break
             ;;
     esac
 done
 
+# Save backup
+cp "$nginx_conf" "$nginx_conf.bak"
+
+# Perform actions
 add_servers
 remove_servers
 
-# Restart nginx to apply the changes
-# service nginx restart
+# Validate configuration
+if ! nginx -t; then
+    echo "Error in nginx.conf, revert to backup!"
+    mv "$nginx_conf.bak" "$nginx_conf"
+else
+    echo "Success!"
+    rm "$nginx_conf.bak"
+    systemctl reload nginx
+fi
+
 
 
