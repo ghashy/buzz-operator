@@ -10,8 +10,12 @@ name = "buzzoperator"
 path = "src/main.rs"
 
 [[bin]]
-name = "update"
-path = "src/bin/update.rs"
+name = "nginx-update"
+path = "src/bin/nginx-update.rs"
+
+[[bin]]
+name = "nginx-update-2"
+path = "src/bin/nginx-update-2.rs"
 
 [dependencies]
 libc = "0.2.149"
@@ -32,6 +36,7 @@ notify = "6.1.1"
 serde = { version = "1.0.186", features = ["derive"] }
 chrono = "0.4.26"
 clap = { version = "4.4.7", features = ["derive"] }
+regex = "1.10.2"
 
 [dev-dependencies]
 # tokio-test = "0.4.3"
