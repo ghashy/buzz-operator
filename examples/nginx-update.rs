@@ -1,3 +1,6 @@
+//! This is an example how you can update NGINX configuration file
+//! using Rust.
+
 use std::{
     fs::{File, OpenOptions},
     io::{BufReader, BufWriter, Read, Write},
@@ -46,9 +49,7 @@ fn main() {
         if !line.trim().strip_prefix("server ").is_some_and(|addr| {
             remove
                 .iter()
-                .find(|&element| {
-                    addr.strip_suffix(';').unwrap_or("") == element
-                })
+                .find(|&element| addr.strip_suffix(';').unwrap_or("") == element)
                 .is_some()
         }) {
             output.push_str(line);
@@ -110,9 +111,8 @@ fn main() {
 }
 
 fn write_conf(output: String) {
-    let mut writer = BufWriter::new(
-        File::create(NGINX_CONF).expect("Can't overwrite nginx config!"),
-    );
+    let mut writer =
+        BufWriter::new(File::create(NGINX_CONF).expect("Can't overwrite nginx config!"));
     writer
         .write_all(output.as_bytes())
         .expect("Can't write text into nginx.conf file!");

@@ -1,6 +1,11 @@
 #!/bin/bash
 
-# TESTED ON LINUX ONLY! (debian)
+# This is an example how you can update NGINX configuration file
+# using bash scripting.
+
+# THIS SCRIPT TESTED ON LINUX ONLY (debian). On such systems like macos,
+# there are different `awk` and `sed` (BSD instead of GNU) implementations,
+# so this script may not work as expected.
 
 # Define the paths to the nginx configuration file and the temporary file
 nginx_conf="/etc/nginx/nginx.conf"
@@ -41,6 +46,7 @@ remove_servers() {
 add_arr=()
 rem_arr=()
 
+# Parse arguments
 while [[ -n "$1" ]]; do
     case "$1" in
         --add)
@@ -67,7 +73,7 @@ done
 # Save backup
 cp "$nginx_conf" "$nginx_conf.bak"
 
-# Perform actions
+# Perform action
 add_servers
 remove_servers
 
