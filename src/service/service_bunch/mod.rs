@@ -336,9 +336,22 @@ impl ServiceBunch {
             Ok(pid) => pid,
             Err(e) => {
                 tracing::error!("Failed to start ServiceUnit with: {}", e);
-                self.state.update(state_machine::Event::StopRequest);
-                let _ = self.terminate();
-                return Err(ServiceBunchError::FailedToStart);
+                match self.state.current() {
+                    // If failed on start, terminate self
+                    state_machine::State::Starting => {
+                        self.state.update(state_machine::Event::StopRequest);
+                        let _ = self.terminate();
+                        return Err(ServiceBunchError::FailedToStart);
+                    }
+                    // If failed on update, stop update
+                    state_machine::State::Updating => {
+                        self.state.update(state_machine::Event::UpdatingFailed);
+                        return Err(ServiceBunchError::FailedToStart);
+                    }
+                    _ => {
+                        unreachable!()
+                    }
+                }
             }
         };
         self.join_set.spawn(async move { service.wait_on().await });
