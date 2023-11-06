@@ -78,7 +78,7 @@ impl ServiceUnit {
 
         // Redirect output to logfile if any, or to dev/null
         if let Some(ref logfile) = config.log_dir {
-            if let Ok(logfile) = OpenOptions::new().append(true).open(logfile) {
+            if let Ok(logfile) = OpenOptions::new().create(true).append(true).open(logfile) {
                 command.stdin(Stdio::from(logfile));
             } else {
                 tracing::error!(
