@@ -1,3 +1,7 @@
+use std::fs::{File, OpenOptions};
+use std::io::BufWriter;
+use std::process::Stdio;
+
 use async_trait::async_trait;
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -33,9 +37,7 @@ impl std::fmt::Display for ServiceUnitError {
             ServiceUnitError::ExitError { id, err } => {
                 f.write_fmt(format_args!("{} pid: {} ", err, id))
             }
-            ServiceUnitError::ServiceNotStarted(err) => {
-                f.write_fmt(format_args!("{}", err))
-            }
+            ServiceUnitError::ServiceNotStarted(err) => f.write_fmt(format_args!("{}", err)),
             ServiceUnitError::MpscError => f.write_str("Mpsc error"),
         }
     }
@@ -74,7 +76,29 @@ impl ServiceUnit {
             UnitVersion::New => &config.new_exec_name,
         }));
 
-        // We run our process in `app_dir` from provided config
+        // Redirect output to logfile if any, or to dev/null
+        if let Some(ref logfile) = config.log_dir {
+            if let Ok(logfile) = OpenOptions::new().append(true).open(logfile) {
+                command.stdin(Stdio::from(logfile));
+            } else {
+                tracing::error!(
+                    "Failed to create log file {} for {} unit service",
+                    logfile.display(),
+                    config.name
+                );
+                command.stdout(Stdio::null());
+                command.stderr(Stdio::null());
+            };
+        } else {
+            tracing::info!(
+                "Log dir not set for {} unit service, redirect output to dev/null",
+                config.name
+            );
+            command.stdout(Stdio::null());
+            command.stderr(Stdio::null());
+        }
+
+        // Run process in `app_dir` from provided config
         command.current_dir(&config.app_dir);
 
         // WARN: Backend service we run should accept these arguments
@@ -83,12 +107,7 @@ impl ServiceUnit {
                 command.args(&["--unix-socket".into(), sock.to_owned()]);
             }
             ConnectAddr::Tcp { addr, port } => {
-                command.args(&[
-                    "--ip",
-                    &addr.to_string(),
-                    "--port",
-                    &port.to_string(),
-                ]);
+                command.args(&["--ip", &addr.to_string(), "--port", &port.to_string()]);
             }
         }
 
