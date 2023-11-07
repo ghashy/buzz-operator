@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+
+# First argument is address like 127.0.0.1:8080
+# Check if an address is provided as argument
+if [ $# -eq 0 ]; then
+    echo "Please provide an address as argument."
+    exit 1
+fi
+
+address="$1"
+
+# Perform the health check using curl
+if [[ $address == *":"* ]]; then
+    curl -s --fail "$address/api/health" > /dev/null
+else
+    curl -s --unix-socket "$address/api/health" > /dev/null
+fi
+
+# Check the exit status and return 0 or 1 accordingly
+if [ $? -eq 0 ]; then
+    echo "Health check successful."
+    exit 0
+else
+    echo "Health check failed."
+    exit 1
+fi

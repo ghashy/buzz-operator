@@ -1,11 +1,13 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 
 use tokio::process::Command;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinSet;
 
-use crate::configuration::Configuration;
+use crate::configuration::{Configuration, ServiceConfig};
 use crate::connect_addr::ConnectAddr;
 use crate::fs_watcher::FileSystemWatcher;
 use crate::service::service_bunch::message::Message;
@@ -119,9 +121,11 @@ impl BunchController {
                         Some(message) => {
                             match message {
                                 Message::UnitSpawned(name, addr) => {
+                                    self.start_health_check_tasks(&name, vec![&addr]);
                                     self.run_update_script(&name, Some(vec![addr]), None).await;
                                 }
                                 Message::UnitsSpawned(name, addr) => {
+                                    self.start_health_check_tasks(&name, addr.iter().collect());
                                     self.run_update_script(&name,Some(addr), None).await;
                                 }
                                 Message::UnitDespawned(name ,old) => {
@@ -131,6 +135,7 @@ impl BunchController {
                                     self.run_update_script(&name,None, Some(old)).await;
                                 }
                                 Message::UnitReplaced { name, old, new } => {
+                                    self.start_health_check_tasks(&name, vec![&new]);
                                     self.run_update_script(&name, Some(vec![new]), Some(vec![old])).await;
                                 }
                                 Message::UpdateFail {name, old, new} => {
@@ -193,31 +198,34 @@ impl BunchController {
         }
     }
 
+    /// Run specified in configuration file command to update some
+    /// configuration (NGINX, for example).
+    /// This function will pass args to the command:
+    /// --remove ... (list of addresses to remove from)
+    /// --add ... (list of addresses to add to)
     async fn run_update_script(
         &self,
         name: &str,
         to_add: Option<Vec<ConnectAddr>>,
         to_remove: Option<Vec<ConnectAddr>>,
     ) {
-        let Some(service) = self
-            .config
-            .services
-            .iter()
-            .find(|service| service.name.eq(name))
-        else {
+        let Some(service_config) = self.find_service_config(name) else {
             return;
         };
 
-        let Some(update_script) = &service.update_script else {
+        let Some(update_exec) = &service_config.update_exec else {
             return;
         };
 
-        let command = &mut Command::new(update_script);
+        let command = &mut Command::new(update_exec);
+
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::null());
 
         match (to_add, to_remove) {
             (None, None) => return,
             (None, Some(rm)) => {
-                pass_args(rm.iter().collect(), command, "--rm");
+                pass_args(rm.iter().collect(), command, "--remove");
             }
             (Some(add), None) => {
                 pass_args(add.iter().collect(), command, "--add");
@@ -242,28 +250,41 @@ impl BunchController {
         }
         match command.spawn() {
             Ok(mut child) => {
-                tracing::info!("Run update script for service {}", service.name);
+                tracing::info!("Run update script for service {}", service_config.name);
                 match child.wait().await {
-                    Ok(status) => tracing::info!("Update script exited with status: {:?}", status),
+                    Ok(status) => tracing::info!(
+                        "Update script exited with {} status",
+                        if status.success() { "OK" } else { " ERR " }
+                    ),
                     Err(e) => tracing::error!(
                         "Failed to wait update script for service {}: {}",
-                        service.name,
+                        service_config.name,
                         e
                     ),
                 }
             }
             Err(e) => tracing::error!(
                 "Failed to run update script for service {}: {}",
-                service.name,
+                service_config.name,
                 e
             ),
         }
     }
 
-    async fn run_health_check_script() -> bool {
-        todo!()
+    fn find_service_config(&self, name: &str) -> Option<&ServiceConfig> {
+        let Some(service) = self
+            .config
+            .services
+            .iter()
+            .find(|service| service.name.eq(name))
+        else {
+            return None;
+        };
+        Some(service)
     }
 
+    /// This function removes stable executable, and renames new executable to
+    /// stable.
     fn replace_stable_exec(&self, name: &str) {
         if let Some(service) = self
             .config
@@ -294,6 +315,89 @@ impl BunchController {
                     service.name,
                     e
                 ),
+            }
+        }
+    }
+
+    /// These tasks will execute until health check fails
+    fn start_health_check_tasks(&self, name: &str, addrs: Vec<&ConnectAddr>) {
+        // Find service config by name
+        let Some(service_config) = self.find_service_config(name) else {
+            return;
+        };
+
+        // If exec path is set
+        let Some(exec_path) = &service_config.health_check_exec else {
+            return;
+        };
+
+        // If there are a connection to this service
+        if let Some(connection) = self.bunch_connections.iter().find(|conn| conn.name == name) {
+            for addr in addrs {
+                let addr = addr.clone();
+                let addr_str = addr.to_string();
+                let connection = connection.tx.clone();
+                let exec_path = exec_path.clone();
+                let service_name = service_config.name.clone();
+                let times_per_hour = service_config.health_check_rate.unwrap_or(1);
+                let secs_count = 60 * 60 / times_per_hour as u64;
+
+                tokio::spawn(async move {
+                    loop {
+                        // Setup command
+                        let mut command = Command::new(&exec_path);
+                        // Command output to dev/null
+                        command.stdout(Stdio::null());
+                        command.stderr(Stdio::null());
+                        // Pass addr
+                        command.arg(&addr_str);
+
+                        // Run command, handle exit status
+                        match command.spawn() {
+                            Ok(mut child) => match child.wait().await {
+                                Ok(status) if !status.success() => {
+                                    tracing::warn!(
+                                        "Health check failed for {} service, addr: {}",
+                                        service_name,
+                                        addr_str
+                                    );
+                                    if let Err(e) = connection
+                                        .send(Message::HealthCheckFailed(addr.clone()))
+                                        .await
+                                    {
+                                        tracing::warn!("Failed to send HealthCheckFailed message to {} service: {}", service_name, e);
+                                    }
+                                    break;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to wait exit from health check command ({}) for {} service, error: {}",
+                                        exec_path.display(),
+                                        service_name,
+                                        e
+                                    );
+                                    break;
+                                }
+                                _ => {
+                                    tracing::info!(
+                                        "Health check passed! Service name: {}, addr: {}",
+                                        service_name,
+                                        addr_str
+                                    );
+                                }
+                            },
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to spawn health check command ({}), error: {}",
+                                    exec_path.display(),
+                                    e
+                                );
+                                break;
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_secs(secs_count)).await;
+                    }
+                });
             }
         }
     }

@@ -1,8 +1,13 @@
-use buzz_operator::bunch_controller::BunchController;
+use std::path::Path;
+
+use buzzoperator::bunch_controller::BunchController;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 
-use buzz_operator::configuration;
+use buzzoperator::configuration;
 
+// TODO: add config file verification with -t flag
+// TODO: add `reload` possibility
+// TODO: implement remove all addresses on termination, and stopping all processes gracefully
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     init_tracing_subscriber();
@@ -15,28 +20,24 @@ async fn main() {
 }
 
 fn init_tracing_subscriber() {
-    let app_conf = configuration::AppConfig::load_configuration().unwrap();
-
-    // Make sure log directory exists
-    if !app_conf.log_dir.exists() {
-        std::fs::DirBuilder::new()
-            .create(&app_conf.log_dir)
-            .expect("Failed to create buzzoperator's log directory!");
-    }
+    let filelog = "/var/log/buzzoperator.log";
 
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .with_level(true)
+        .without_time()
         .finish()
         .with(
-            tracing_subscriber::fmt::layer().with_writer(
-                std::fs::File::options()
-                    .create(true)
-                    .append(true)
-                    .write(true)
-                    .open(app_conf.log_dir.join("buzzoperator.log"))
-                    .expect("Can't open log file!"),
-            ),
+            tracing_subscriber::fmt::layer()
+                .with_writer(
+                    std::fs::File::options()
+                        .create(true)
+                        .append(true)
+                        .write(true)
+                        .open(filelog)
+                        .expect("Can't open log file!"),
+                )
+                .with_ansi(false),
         );
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set up tracing");
 }

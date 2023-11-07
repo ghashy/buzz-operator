@@ -1,18 +1,14 @@
 ---
 services:
   - service:
-    name: "hello"
-    instances_count: 2
-    stable_exec_name: "hello"
-    new_exec_name: "new_hello"
-    # Network address:
-    # connect_addr:
-    #   unix: "/path/to/folder/where/to/store/socketfiles"
-    # connect_addr:
-    #   addr: "127.0.0.1"
-    #   port: 80
+    name: "my_app"
+    instances_count: 3
+    stable_exec_name: "my_app"
+    new_exec_name: "my_app_new"
     # If there more than 1 instance, all other will be next addresses in order,
     # or, if unavailable, other random addresses.
+    # connect_addr:
+    #   unix: "/path/to/folder/where/to/store/socketfiles"
     connect_addr:
       addr: "127.0.0.1"
       port: 8000
@@ -20,8 +16,16 @@ services:
     # Set to 5 by default.
     fails_limit: 5
     
-    
-    update_script: "/home/ghashy/dev/crates/buzz-operator/test_app/update"
-    app_dir: "/home/ghashy/dev/crates/buzz-operator/test_app/exec_dir"
-    log_dir: "/home/ghashy/dev/crates/buzz-operator/test_app/log_dir"
+    # In this directory buzzoperator waits a new executable to start rolling update
+    app_dir: "path/to/my/app/directory"
+    # stdout and stderr will be piped into log file in this directory
+    log_dir: "/path/to/my/log/directory"
+    # This script will be run when service instance started or stopped.
+    # Exec should accept args --add "addr1" "addr2" "addr3" --remove "addr1" "addr2" "addr3", there is example in the `bash` folder.
+    update_exec: "bash/nginx-update"
+    # If set, will be called to check if service available
+    # Should accept 1 arg "addr", there is example in the `bash` folder. 
+    health_check_exec: "bash/health-check"
+    # (Optional) means call 1 times per hour (every minute). 1 by default. Should be integer value
+    health_check_rate: 1
 ...

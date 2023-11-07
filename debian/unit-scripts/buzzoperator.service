@@ -1,14 +1,51 @@
 [Unit]
+Description = "Automate deployment, rolling updating, health checking, etc."
 AssertPathExists=/usr/bin/buzzoperator
 
 [Service]
 # Customise later
-User=ghashy
-WorkingDirectory=~
+# User=ghashy
+# WorkingDirectory=~
+# PrivateTmp=true
+# NoNewPrivileges=true
+# Restart=always
+# ExecStartPre=/usr/bin/buzzoperator -t
+# ExecReload=/usr/bin/buzzoperator reload
 ExecStart=/usr/bin/buzzoperator
-Restart=always
-PrivateTmp=true
-NoNewPrivileges=true
+# ExecStop=/usr/bin/buzzoperator stop
+TimeoutStopSec=5
+# StandardOutput=append:/var/log/buzzoperator.log
+# StandardError=append:/var/log/buzzoperator.log
+# SyslogIdentifier=buzzoperator
 
 [Install]
 WantedBy=default.target
+
+# [Unit]
+# - Description: This option provides a brief description of the service, which can be used for informational purposes.
+
+# - AssertPathExists: This option specifies a path that must exist for the service to start successfully. In this case, it ensures that the file "/usr/bin/buzzoperator" exists before starting the service.
+
+# [Service]
+# - User: This option allows you to specify the user under which the service should run. By default, services run as the root user, but you can customize it by uncommenting the line and providing the desired username.
+
+# - WorkingDirectory: This option sets the working directory for the service. By default, the service runs in the root directory, but you can customize it by uncommenting the line and providing the desired directory path.
+
+# - PrivateTmp: When set to true, this option creates a private /tmp directory for the service, isolating it from other processes. This can enhance security and prevent interference between services. It is enabled by default.
+
+# - NoNewPrivileges: When set to true, this option prevents the service from gaining additional privileges after it starts. This can enhance security by limiting the service's capabilities. It is enabled by default.
+
+# - Restart: This option controls the service's restart behavior. By setting it to "always", the service will be automatically restarted if it exits or fails. You can customize this behavior by using other options like "on-failure" or "on-abnormal".
+
+# - ExecStartPre: This option specifies a command or script to be run before the main service is started. In this case, it runs the command "/usr/bin/buzzoperator -t" as a preparation step.
+
+# - ExecReload: This option specifies a command or script to be run when the service is reloaded. In this case, it runs the command "/usr/bin/buzzoperator reload".
+
+# - ExecStart: This option specifies the main command or script to be run to start the service. In this case, it runs the command "/usr/bin/buzzoperator".
+
+# - ExecStop: This option specifies the command or script to be run to stop the service. In this case, it runs the command "/usr/bin/buzzoperator stop".
+
+# - TimeoutStopSec: This option sets the maximum time in seconds that the service is given to stop gracefully after receiving a stop signal. If the service does not stop within this time, it will be forcibly terminated.
+
+# [Install]
+# - WantedBy: This option specifies the target unit that should be enabled when the service is started. In this case, it is set to "default.target", which is the default target unit for multi-user systems.

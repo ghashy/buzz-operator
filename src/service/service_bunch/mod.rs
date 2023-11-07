@@ -95,7 +95,7 @@ impl ServiceBunch {
 
     /// Returns `false`, if found process with given `pid` among
     /// the `new_connections`. Otherwise, `true`.
-    fn is_new_pid(&self, pid: ProcessID) -> bool {
+    fn is_stable_pid(&self, pid: ProcessID) -> bool {
         match self.new_connections.iter().find(|c| c.get_pid() == pid) {
             Some(_) => false,
             None => true,
@@ -123,7 +123,7 @@ impl ServiceBunch {
         };
 
         // Limit to 1 for unstable
-        if !self.is_new_pid(connection.get_pid()) {
+        if !self.is_stable_pid(connection.get_pid()) {
             return true;
         }
 
@@ -158,6 +158,7 @@ impl ServiceBunch {
         }
     }
 
+    // FIXME: review this method, is it too complicated? Remove duplicates
     /// In the underlying service [`Service::run`] function,
     /// [`ServiceUnitError`] can happen. In this case we handle it here.
     /// We do three things here:
@@ -173,7 +174,7 @@ impl ServiceBunch {
             ExitError { id, err } => {
                 tracing::error!("Pid {} exited with error: {}", id, err);
                 if self.reg_new_failure_and_is_limit_exceeded(id) {
-                    if self.is_new_pid(id) {
+                    if self.is_stable_pid(id) {
                         self.terminate();
                     } else {
                         self.state.update(state_machine::Event::UpdatingFailed);
@@ -205,6 +206,68 @@ impl ServiceBunch {
                                 .await
                             {
                                 tracing::error!("{}", e);
+                            }
+                        });
+                    }
+                }
+            }
+            HealthCheckFailed(addr) => {
+                // If updating state, stop updating
+                if let Some(_) = self.new_connections.iter().find(|c| c.addr().eq(&addr)) {
+                    self.state.update(state_machine::Event::UpdatingFailed);
+                    // If not updating
+                } else if let Some(conn) =
+                    self.stable_connections.iter().find(|c| c.addr().eq(&addr))
+                {
+                    let conn = conn.clone();
+                    // Count failures
+                    if self.reg_new_failure_and_is_limit_exceeded(conn.get_pid()) {
+                        // Terminate entire bunch
+                        self.terminate();
+                    } else {
+                        // Terminate one instance, and start new one
+                        let name = self.config.name.clone();
+                        tracing::error!("Healthcheck failed, terminating unit service {}", name);
+                        let available_addr =
+                            find_available_addresses(&name, &self.config.connect_addr, 1)
+                                .expect("Failed to get available ConnectAddr!");
+                        let (term_tx, pid) = self
+                            .spawn_unit_service(&available_addr[0], UnitVersion::Stable)
+                            .expect("Can't spawn unit service!");
+
+                        self.stable_connections.push(UnitConnection::new(
+                            term_tx,
+                            pid,
+                            available_addr[0].clone(),
+                        ));
+
+                        // Send message to controller
+                        if let Some(lost_connection) =
+                            take_from_vec_with_pid(&mut self.stable_connections, conn.get_pid())
+                        {
+                            let tx = self.controller_tx.clone();
+                            let name = self.config.name.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = tx
+                                    .send(Message::UnitReplaced {
+                                        name,
+                                        old: lost_connection.addr().clone(),
+                                        new: available_addr.into_iter().next().unwrap(),
+                                    })
+                                    .await
+                                {
+                                    tracing::error!("{}", e);
+                                }
+                            });
+                        }
+
+                        tokio::spawn(async move {
+                            if let Err(e) = conn.terminate().await {
+                                tracing::error!(
+                                    "Failed to send termination message to {} service , error: {}",
+                                    name,
+                                    e
+                                );
                             }
                         });
                     }
@@ -309,6 +372,7 @@ impl ServiceBunch {
         {
             tracing::error!("{}", e);
         }
+        self.state.update(state_machine::Event::UpdatingFinished);
         Ok(())
     }
 
@@ -399,9 +463,7 @@ impl Service<ServiceBunchError> for ServiceBunch {
                                     }
                                 }
                                 message::Message::HealthCheckFailed(addr) => {
-                                    // TODO: Check who failed, if update, stop update,
-                                    // if certain pid, count failures, and restart it
-                                    // self.state.update(state_machine::Event::UpdatingFailed);
+                                    self.handle_service_unit_error(ServiceUnitError::HealthCheckFailed(addr));
                                 }
                                 message:: Message::Shutdown => {
                                     let _ = self.terminate();

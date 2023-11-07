@@ -14,11 +14,7 @@ pub(super) struct UnitConnection {
 }
 
 impl UnitConnection {
-    pub(super) fn new(
-        sender: mpsc::Sender<()>,
-        pid: ProcessID,
-        connect_addr: ConnectAddr,
-    ) -> Self {
+    pub(super) fn new(sender: mpsc::Sender<()>, pid: ProcessID, connect_addr: ConnectAddr) -> Self {
         UnitConnection {
             termination_sender: sender,
             pid,

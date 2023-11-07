@@ -1,9 +1,10 @@
 [package]
-name = "buzz-operator"
+name = "buzzoperator"
 authors = ["ghashy <obsidian.musicwork@gmail.com>"]
 version = "0.1.0"
 edition = "2021"
 description = "Automate deployment, rolling updating, health checking, etc."
+license-file = "LICENSE-MIT"
 
 [[bin]]
 name = "buzzoperator"
@@ -30,9 +31,6 @@ chrono = "0.4.26"
 clap = { version = "4.4.7", features = ["derive"] }
 regex = "1.10.2"
 
-[dev-dependencies]
-# tokio-test = "0.4.3"
-
 [[example]]
 name = "nginx-update"
 path = "examples/nginx-update.rs"
@@ -49,5 +47,11 @@ extended-description = "Here will be extended description."
 section = "admin"
 priority = "optional"
 maintainer-scripts = "debian/scripts"
-systemd-units = { enable = true, unit-scripts = "debian/unit-scripts", unit-name = "buzzoperator" }
-assets = [["target/release/buzzoperator", "usr/bin/buzzoperator", "755"]]
+# TODO: enable should be true by default, but management commands should be implemented
+# for now, temporary solution is disable by default
+systemd-units = { enable = false, unit-scripts = "debian/unit-scripts", unit-name = "buzzoperator" }
+conf-files = ["etc/buzzoperator/buzzoperator.yaml"]
+assets = [
+    ["target/release/buzzoperator", "usr/bin/buzzoperator", "755"],
+    ["buzzoperator.yaml", "etc/buzzoperator/buzzoperator.yaml", "755"]
+]

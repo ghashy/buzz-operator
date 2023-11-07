@@ -1,5 +1,4 @@
-use std::fs::{File, OpenOptions};
-use std::io::BufWriter;
+use std::fs::OpenOptions;
 use std::process::Stdio;
 
 use async_trait::async_trait;
@@ -22,9 +21,13 @@ pub(super) type ProcessID = u32;
 #[derive(Debug)]
 pub enum ServiceUnitError {
     /// `ServiceUnit` exited with non zero code
-    ExitError { id: ProcessID, err: String },
+    ExitError {
+        id: ProcessID,
+        err: String,
+    },
     /// `run` function failed to start service
     ServiceNotStarted(std::io::Error),
+    HealthCheckFailed(ConnectAddr),
     /// Any error with [tokio::sync::mpsc::channel]
     MpscError,
 }
@@ -39,6 +42,10 @@ impl std::fmt::Display for ServiceUnitError {
             }
             ServiceUnitError::ServiceNotStarted(err) => f.write_fmt(format_args!("{}", err)),
             ServiceUnitError::MpscError => f.write_str("Mpsc error"),
+            ServiceUnitError::HealthCheckFailed(addr) => f.write_fmt(format_args!(
+                "Health check failed, addr: {}",
+                addr.to_string()
+            )),
         }
     }
 }

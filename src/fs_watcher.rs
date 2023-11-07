@@ -1,9 +1,4 @@
-use std::{
-    future::Future,
-    path::Path,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::path::Path;
 
 use notify::{Event, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};

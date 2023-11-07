@@ -1,0 +1,28 @@
+---
+services:
+  - service:
+    name: "zero2prod"
+    instances_count: 2
+    stable_exec_name: "zero2prod"
+    new_exec_name: "zero2prod_new"
+    # Network address:
+    # connect_addr:
+    #   unix: "/path/to/folder/where/to/store/socketfiles"
+    # connect_addr:
+    #   addr: "127.0.0.1"
+    #   port: 80
+    # If there more than 1 instance, all other will be next addresses in order,
+    # or, if unavailable, other random addresses.
+    connect_addr:
+      addr: "127.0.0.1"
+      port: 8000
+    # Allowed count of unexpected fails per minute for single process.
+    # Set to 5 by default.
+    fails_limit: 5
+    
+    
+    update_script: "/home/ghashy/apps/zero2prod/nginx-update"
+    app_dir: "/home/ghashy/apps/zero2prod/"
+    log_dir: "/home/ghashy/apps/zero2prod/logs"
+...
+

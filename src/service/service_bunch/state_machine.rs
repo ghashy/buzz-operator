@@ -51,20 +51,14 @@ impl StateBox {
     fn next(self, event: Event) -> StateBox {
         match (&self, event) {
             // Transition to update state
-            (StateBox(State::Running), Event::UpdateRequest) => {
-                StateBox(State::Updating)
-            }
+            (StateBox(State::Running), Event::UpdateRequest) => StateBox(State::Updating),
             // Transition to running state
             (StateBox(State::Starting), Event::ServicesEstablished)
             | (StateBox(State::Updating), Event::UpdatingFinished)
-            | (StateBox(State::Updating), Event::UpdatingFailed) => {
-                StateBox(State::Running)
-            }
+            | (StateBox(State::Updating), Event::UpdatingFailed) => StateBox(State::Running),
             // Transition to stopping state
             (StateBox(State::Running), Event::StopRequest)
-            | (StateBox(State::Updating), Event::StopRequest) => {
-                StateBox(State::Stopping)
-            }
+            | (StateBox(State::Updating), Event::StopRequest) => StateBox(State::Stopping),
             _ => self,
         }
     }
