@@ -85,17 +85,25 @@ impl ServiceUnit {
 
         // Redirect output to logfile if any, or to dev/null
         if let Some(ref logfile) = config.log_dir {
-            if let Ok(logfile) = OpenOptions::new().create(true).append(true).open(logfile) {
-                command.stdin(Stdio::from(logfile));
-            } else {
-                tracing::error!(
-                    "Failed to create log file {} for {} unit service",
-                    logfile.display(),
-                    config.name
-                );
-                command.stdout(Stdio::null());
-                command.stderr(Stdio::null());
-            };
+            match OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(logfile.join(&config.name))
+            {
+                Ok(logfile) => {
+                    command.stdin(Stdio::from(logfile));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to create log file {} for {} unit service, error: {}",
+                        logfile.display(),
+                        config.name,
+                        e
+                    );
+                    command.stdout(Stdio::null());
+                    command.stderr(Stdio::null());
+                }
+            }
         } else {
             tracing::info!(
                 "Log dir not set for {} unit service, redirect output to dev/null",
