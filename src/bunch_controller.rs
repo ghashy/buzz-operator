@@ -14,10 +14,6 @@ use crate::service::service_bunch::message::Message;
 use crate::service::service_bunch::{ServiceBunch, ServiceBunchError};
 use crate::service::Service;
 
-// TODO: implement healthchecks
-// Create separate module, and give tx, and addresses, and config params with
-// healthchecks. It will check and send
-
 struct BunchConnection {
     name: String,
     tx: Sender<Message>,
@@ -90,7 +86,8 @@ impl BunchController {
         }
     }
 
-    pub async fn run(&mut self) {
+    /// Run this controller.
+    pub async fn run_and_wait(&mut self) {
         // Take ownership over `bunches` vec.
         let bunches = std::mem::replace(&mut self.bunches, Vec::new());
         // Spawn all bunches tasks in the `bunches_join`
@@ -171,6 +168,9 @@ impl BunchController {
         }
     }
 
+    /// Try to send update request to `ServiceBunch` by app_dir path.
+    /// By path, because file notification system look for new backend service's
+    /// executables in the specified paths.
     async fn send_update_message(&self, path: &PathBuf) {
         // If there are service which have this app_dir path and new_exec_name
         if let Some(service) = self
@@ -271,19 +271,7 @@ impl BunchController {
         }
     }
 
-    fn find_service_config(&self, name: &str) -> Option<&ServiceConfig> {
-        let Some(service) = self
-            .config
-            .services
-            .iter()
-            .find(|service| service.name.eq(name))
-        else {
-            return None;
-        };
-        Some(service)
-    }
-
-    /// This function removes stable executable, and renames new executable to
+    /// This function removes stable executable from `app_dir`, and renames new executable to
     /// stable.
     fn replace_stable_exec(&self, name: &str) {
         if let Some(service) = self
@@ -320,6 +308,8 @@ impl BunchController {
     }
 
     /// These tasks will execute until health check fails
+    /// If healthcheck exec returns not 0, we think that it is failure, and
+    /// we send message `HealthCheckFailed`.
     fn start_health_check_tasks(&self, name: &str, addrs: Vec<&ConnectAddr>) {
         // Find service config by name
         let Some(service_config) = self.find_service_config(name) else {
@@ -370,7 +360,7 @@ impl BunchController {
                                     break;
                                 }
                                 Err(e) => {
-                                    tracing::warn!(
+                                    tracing::error!(
                                         "Failed to wait exit from health check command ({}) for {} service, error: {}",
                                         exec_path.display(),
                                         service_name,
@@ -379,11 +369,11 @@ impl BunchController {
                                     break;
                                 }
                                 _ => {
-                                    tracing::info!(
-                                        "Health check passed! Service name: {}, addr: {}",
-                                        service_name,
-                                        addr_str
-                                    );
+                                    // tracing::info!(
+                                    //     "Health check passed! Service name: {}, addr: {}",
+                                    //     service_name,
+                                    //     addr_str
+                                    // );
                                 }
                             },
                             Err(e) => {
@@ -400,6 +390,14 @@ impl BunchController {
                 });
             }
         }
+    }
+
+    /// Try to find the service config by a name.
+    fn find_service_config(&self, name: &str) -> Option<&ServiceConfig> {
+        self.config
+            .services
+            .iter()
+            .find(|service| service.name.eq(name))
     }
 }
 
