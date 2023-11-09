@@ -40,18 +40,20 @@ enum Mode {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start service with name, specified in the config.
-    Start(ServiceName),
-    /// Stop service with name, specified in the config.
-    Stop(ServiceName),
-    /// Restart service with name, specified in the config.
-    Restart(ServiceName),
+    /// Start services with name, specified in the config.
+    Start(Services),
+    /// Stop services with name, specified in the config.
+    Stop(Services),
+    /// Get status of services.
+    Status(Services),
+    /// Restart services with name, specified in the config.
+    Restart(Services),
 }
 
 #[derive(Args)]
-struct ServiceName {
-    /// Name of the service.
-    name: String,
+struct Services {
+    /// Names of the services.
+    names: Vec<String>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -123,6 +125,7 @@ async fn main() -> ExitCode {
             //         return ExitCode::FAILURE;
             //     };
             match command {
+                // name can be 'all'
                 Commands::Start(name) => todo!(),
                 Commands::Stop(name) => todo!(),
                 Commands::Restart(name) => todo!(),
@@ -135,7 +138,7 @@ async fn main() -> ExitCode {
 
 // TODO: Finish this
 async fn start_daemon(config: configuration::Configuration, listener: UnixListener) {
-    let mut controller = BunchController::new(config);
+    let (mut controller, mut tx) = BunchController::new(config);
     controller.run_and_wait().await;
 
     if let Err(e) = remove_sock() {

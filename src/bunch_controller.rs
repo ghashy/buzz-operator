@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -13,6 +14,23 @@ use crate::fs_watcher::FileSystemWatcher;
 use crate::service::service_bunch::message::Message;
 use crate::service::service_bunch::{ServiceBunch, ServiceBunchError};
 use crate::service::Service;
+
+pub enum Commands {
+    StartServices(Vec<String>),
+    StopServices(Vec<String>),
+    RestartServices(Vec<String>),
+    SendStatusToStream(Vec<String>),
+    StartAll,
+    StopAll,
+    RestartAll,
+    Exit,
+}
+
+/// `UnixStream` is used to send feedback about command execution
+pub struct ControllerCommand {
+    command: Commands,
+    feedback: UnixStream,
+}
 
 struct BunchConnection {
     name: String,
@@ -54,37 +72,78 @@ pub struct BunchController {
     bunches: Vec<ServiceBunch>,
     bunches_join: JoinSet<Result<(), ServiceBunchError>>,
     message_receiver: Receiver<Message>,
+    /// We store it here, because without it Receiver will drop connection
+    controller_tx: Sender<Message>,
+    commands_receiver: Receiver<ControllerCommand>,
     config: Configuration,
+    empty_handler: tokio::sync::oneshot::Sender<()>,
 }
 
 impl BunchController {
-    pub fn new(config: Configuration) -> BunchController {
-        let mut bunches = Vec::new();
-        let mut bunch_connections = Vec::new();
+    pub fn new(config: Configuration) -> (BunchController, Sender<ControllerCommand>) {
+        let bunches: Vec<ServiceBunch> = Vec::new();
+        let bunch_connections: Vec<BunchConnection> = Vec::new();
+        let fs_watcher = FileSystemWatcher::new();
+        // Connection to bunches
         let (controller_tx, message_receiver) = tokio::sync::mpsc::channel(100);
-        for service_config in config.services.clone().into_iter() {
-            let (tx, controller_rx) = tokio::sync::mpsc::channel(100);
-            let name = service_config.name.clone();
-            let service_bunch =
-                ServiceBunch::new(service_config, controller_rx, controller_tx.clone());
-            bunches.push(service_bunch);
-            bunch_connections.push(BunchConnection { name, tx });
-        }
-        let fs_watcher = FileSystemWatcher::new(
-            &bunches
-                .iter()
-                .map(|bunch| bunch.get_config().app_dir.as_path())
-                .collect::<Vec<&Path>>()[..],
-        );
-        BunchController {
-            fs_watcher,
-            bunch_connections,
-            bunches,
-            bunches_join: JoinSet::new(),
-            message_receiver,
-            config,
-        }
+        // Connection to app
+        let (app_tx, commands_receiver) = tokio::sync::mpsc::channel(100);
+
+        // For JoinSet not to close
+        let (empty_handler, rx) = tokio::sync::oneshot::channel::<()>();
+        let mut joinset = JoinSet::new();
+        joinset.spawn(async move {
+            let _ = rx.await;
+            Ok(())
+        });
+
+        (
+            BunchController {
+                fs_watcher,
+                bunch_connections,
+                bunches,
+                bunches_join: joinset,
+                controller_tx,
+                message_receiver,
+                commands_receiver,
+                config,
+                empty_handler,
+            },
+            app_tx,
+        )
     }
+
+    pub fn update_config(&mut self, new: Configuration) {
+        self.config = new
+    }
+
+    pub fn run_command(&mut self, command: ControllerCommand) {
+        // match command.command {
+        //     Commands::StartServices(services) => todo!(),
+        //     Commands::StopServices(services) => todo!(),
+        //     Commands::RestartServices(services ) => todo!(),
+        //     Commands::SendStatusToStream(services ) => todo!(),
+        //     Commands::StartAll => todo!(),
+        //     Commands::StopAll => todo!(),
+        //     Commands::RestartAll => todo!(),
+        //     Commands::Exit => todo!(),
+        // }
+    }
+
+    // pub fn spawn(&mut self, names: Vec<String>) {
+    //     for service_request in names.into_iter() {
+
+    //     }
+    //     self.config.services.iter().filter(|service_conf| service_conf.name)
+    //     for service_config in config.services.clone().into_iter() {
+    //         let (tx, controller_rx) = tokio::sync::mpsc::channel(100);
+    //         let name = service_config.name.clone();
+    //         let service_bunch =
+    //             ServiceBunch::new(service_config, controller_rx, controller_tx.clone());
+    //         bunches.push(service_bunch);
+    //         bunch_connections.push(BunchConnection { name, tx });
+    //     }
+    // }
 
     /// Run this controller.
     pub async fn run_and_wait(&mut self) {
@@ -102,6 +161,12 @@ impl BunchController {
 
         loop {
             tokio::select! {
+                // Wait commands
+                command = self.commands_receiver.recv() => {
+                    if let Some(command) = command {
+                        self.run_command(command);
+                    }
+                }
                 // Wait bunches executing
                 bunch_join = self.bunches_join.join_next() => {
                     match bunch_join {
