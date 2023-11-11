@@ -1,4 +1,7 @@
-use tokio::sync::mpsc::{self, error::SendError};
+use tokio::sync::{
+    mpsc::{self, error::SendError},
+    oneshot,
+};
 
 use super::service_unit::ProcessID;
 use crate::connect_addr::ConnectAddr;
@@ -8,7 +11,7 @@ use crate::connect_addr::ConnectAddr;
 /// process.
 #[derive(Clone)]
 pub(super) struct UnitConnection {
-    termination_sender: mpsc::Sender<()>,
+    termination_sender: oneshot::Sender<()>,
     pid: ProcessID,
     connect_addr: ConnectAddr,
 }

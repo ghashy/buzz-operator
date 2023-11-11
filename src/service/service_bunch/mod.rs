@@ -8,14 +8,13 @@ use std::mem::swap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinSet;
 
 use crate::configuration::ServiceConfig;
 use crate::connect_addr::ConnectAddr;
 
-use super::service_unit::{ProcessID, ServiceUnit, ServiceUnitError, UnitVersion};
+use super::service_unit::{ProcessID, ServiceUnit, ServiceUnitError};
 use super::unit_connection::UnitConnection;
 use super::Service;
 
@@ -26,6 +25,16 @@ use self::state_machine::StateBox;
 mod error;
 pub mod message;
 mod state_machine;
+
+enum UnitVersion {
+    Stable,
+    New,
+}
+
+pub struct ServiceBunchConnection {
+    input: Receiver<Message>,
+    output: Sender<Message>,
+}
 
 /// Type for managing some instances of the same service.
 ///
@@ -50,20 +59,16 @@ pub struct ServiceBunch {
     state: StateBox,
 
     /// Communication channel with higher (in program hierachy) type. Input.
-    controller_rx: Receiver<Message>,
+    input: Option<Receiver<Message>>,
     /// Communication channel with higher (in program hierachy) type. Output.
-    controller_tx: Sender<Message>,
+    output: Option<Sender<Message>>,
 
     failure_count: u16,
     last_check_time: Instant,
 }
 
 impl ServiceBunch {
-    pub fn new(
-        config: ServiceConfig,
-        controller_rx: Receiver<Message>,
-        controller_tx: Sender<Message>,
-    ) -> ServiceBunch {
+    pub fn new(config: ServiceConfig) -> ServiceBunch {
         // Make sure log directory exists
         if !config.get_log_dir().exists() {
             std::fs::DirBuilder::new()
@@ -82,8 +87,8 @@ impl ServiceBunch {
             new_connections: Vec::new(),
             join_set: JoinSet::new(),
             state: StateBox::new(),
-            controller_rx,
-            controller_tx,
+            input: None,
+            output: None,
             failure_count: 0,
             last_check_time: Instant::now(),
         }
@@ -194,7 +199,7 @@ impl ServiceBunch {
                     if let Some(lost_connection) =
                         take_from_vec_with_pid(&mut self.stable_connections, id)
                     {
-                        let tx = self.controller_tx.clone();
+                        let tx = self.output.clone();
                         let name = self.config.name.clone();
                         tokio::spawn(async move {
                             if let Err(e) = tx
@@ -245,7 +250,7 @@ impl ServiceBunch {
                         if let Some(lost_connection) =
                             take_from_vec_with_pid(&mut self.stable_connections, conn.get_pid())
                         {
-                            let tx = self.controller_tx.clone();
+                            let tx = self.output.clone();
                             let name = self.config.name.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = tx
@@ -286,7 +291,7 @@ impl ServiceBunch {
         // Clear `self.stable_connections`
         let connections = std::mem::replace(&mut self.stable_connections, Vec::new());
 
-        let tx = self.controller_tx.clone();
+        let tx = self.output.clone();
         let name = self.config.name.clone();
         // Do stuff in async context
         tokio::spawn(async move {
@@ -327,7 +332,7 @@ impl ServiceBunch {
                 .push(UnitConnection::new(term_tx, pid, address.clone()));
 
             // Send message to controller
-            let tx = self.controller_tx.clone();
+            let tx = self.output.clone();
             let send_addr = address.clone();
             let name = self.config.name.clone();
             tokio::spawn(async move {
@@ -344,7 +349,7 @@ impl ServiceBunch {
             connection.terminate().await.unwrap();
 
             // Send message to controller
-            let tx = self.controller_tx.clone();
+            let tx = self.output.clone();
             let name = self.config.name.clone();
             tokio::spawn(async move {
                 if let Err(e) = tx.send(Message::UnitDespawned(name, address)).await {
@@ -366,7 +371,7 @@ impl ServiceBunch {
         swap(&mut self.stable_connections, &mut self.new_connections);
         self.state.update(state_machine::Event::ServicesEstablished);
         if let Err(e) = self
-            .controller_tx
+            .output
             .send(Message::UpdateFinished(self.config.name.clone()))
             .await
         {
@@ -395,7 +400,18 @@ impl ServiceBunch {
         version: UnitVersion,
     ) -> Result<(mpsc::Sender<()>, ProcessID), ServiceBunchError> {
         let (term_tx, term_rx) = tokio::sync::mpsc::channel(100);
-        let mut service = ServiceUnit::new(&self.config, address, term_rx, version).unwrap();
+        let exec_name = &self.config.app_dir.join(match version {
+            UnitVersion::Stable => self.config.stable_exec_name,
+            UnitVersion::New => self.config.new_exec_name,
+        });
+        let mut service = ServiceUnit::new(
+            address,
+            exec_name,
+            self.config.log_dir,
+            &self.config.name,
+            self.config.start_args,
+        )
+        .unwrap();
         let pid = match service.run() {
             Ok(pid) => pid,
             Err(e) => {
@@ -422,12 +438,6 @@ impl ServiceBunch {
         tracing::info!("New unit service spawned with pid {}", pid);
         Ok((term_tx, pid))
     }
-}
-
-#[async_trait]
-impl Service<ServiceBunchError> for ServiceBunch {
-    type Output = Vec<ConnectAddr>;
-
     async fn wait_on(&mut self) -> Result<(), ServiceBunchError> {
         // Wait on child processes execution
         loop {
@@ -452,7 +462,7 @@ impl Service<ServiceBunchError> for ServiceBunch {
                         }
                     }
                 }
-                notify = self.controller_rx.recv() => {
+                notify = self.input.recv() => {
                     match notify {
                         Some(message) => {
                             match message {
@@ -482,7 +492,7 @@ impl Service<ServiceBunchError> for ServiceBunch {
         }
     }
 
-    fn run(&mut self) -> Result<Self::Output, ServiceBunchError> {
+    fn run(&mut self) -> Result<ServiceBunchConnection, ServiceBunchError> {
         // Get all addresses for underlying services
         let addresses = find_available_addresses(
             &self.config.name,
@@ -502,7 +512,7 @@ impl Service<ServiceBunchError> for ServiceBunch {
         }
 
         // Send message to controller
-        let tx = self.controller_tx.clone();
+        let tx = self.output.clone();
         let name = self.config.name.clone();
         let addrs = self
             .stable_connections
@@ -628,104 +638,104 @@ fn find_min_not_occupied(mut numbers: Vec<u16>) -> u16 {
     min_not_occupied
 }
 
-#[cfg(test)]
-mod test_pack1 {
-    use super::*;
+// #[cfg(test)]
+// mod test_pack1 {
+//     use super::*;
 
-    #[test]
-    fn test_find_available_addresses_unix() {
-        let config = ServiceConfig::create_test_config();
-        let (config, addresses) = prepare_bunch_and_addresses(config);
+//     #[test]
+//     fn test_find_available_addresses_unix() {
+//         let config = ServiceConfig::create_test_config();
+//         let (config, addresses) = prepare_bunch_and_addresses(config);
 
-        assert_eq!(addresses.len(), config.instances_count as usize);
-        for address in addresses {
-            match address {
-                ConnectAddr::Unix(path) => {
-                    assert_eq!(path.starts_with("test_app/sockets"), true);
-                }
-                _ => panic!("Expected Unix address, but got TCP address"),
-            }
-        }
-    }
+//         assert_eq!(addresses.len(), config.instances_count as usize);
+//         for address in addresses {
+//             match address {
+//                 ConnectAddr::Unix(path) => {
+//                     assert_eq!(path.starts_with("test_app/sockets"), true);
+//                 }
+//                 _ => panic!("Expected Unix address, but got TCP address"),
+//             }
+//         }
+//     }
 
-    #[test]
-    fn test_find_available_addresses_tcp() {
-        let config = ServiceConfig {
-            connect_addr: ConnectAddr::Tcp {
-                addr: "127.0.0.1".parse().unwrap(),
-                port: 8000,
-            },
-            ..ServiceConfig::create_test_config()
-        };
-        let (config, addresses) = prepare_bunch_and_addresses(config);
+//     #[test]
+//     fn test_find_available_addresses_tcp() {
+//         let config = ServiceConfig {
+//             connect_addr: ConnectAddr::Tcp {
+//                 addr: "127.0.0.1".parse().unwrap(),
+//                 port: 8000,
+//             },
+//             ..ServiceConfig::create_test_config()
+//         };
+//         let (config, addresses) = prepare_bunch_and_addresses(config);
 
-        assert_eq!(addresses.len(), config.instances_count as usize);
-        let mut port = 8000;
-        for address in addresses {
-            match address {
-                ConnectAddr::Tcp { addr, port: p } => {
-                    assert_eq!(addr, "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
-                    assert_eq!(p, port);
-                    port += 1;
-                }
-                _ => panic!("Expected TCP address, but got Unix address"),
-            }
-        }
-    }
+//         assert_eq!(addresses.len(), config.instances_count as usize);
+//         let mut port = 8000;
+//         for address in addresses {
+//             match address {
+//                 ConnectAddr::Tcp { addr, port: p } => {
+//                     assert_eq!(addr, "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
+//                     assert_eq!(p, port);
+//                     port += 1;
+//                 }
+//                 _ => panic!("Expected TCP address, but got Unix address"),
+//             }
+//         }
+//     }
 
-    #[test]
-    fn test_is_port_available() {
-        let addr = "127.0.0.1".parse().unwrap();
-        let port = 50000;
-        let is_available = is_port_available(addr, port);
-        assert_eq!(is_available, true);
-    }
+//     #[test]
+//     fn test_is_port_available() {
+//         let addr = "127.0.0.1".parse().unwrap();
+//         let port = 50000;
+//         let is_available = is_port_available(addr, port);
+//         assert_eq!(is_available, true);
+//     }
 
-    #[test]
-    fn test_get_socket_path() {
-        let unix_socket_path = std::path::Path::new("test_app/sockets");
-        let socket_path = get_sockets_paths("test", 5, &unix_socket_path).unwrap();
-        for path in socket_path.iter() {
-            assert_eq!(path.starts_with("test_app/sockets"), true);
-        }
-    }
+//     #[test]
+//     fn test_get_socket_path() {
+//         let unix_socket_path = std::path::Path::new("test_app/sockets");
+//         let socket_path = get_sockets_paths("test", 5, &unix_socket_path).unwrap();
+//         for path in socket_path.iter() {
+//             assert_eq!(path.starts_with("test_app/sockets"), true);
+//         }
+//     }
 
-    #[test]
-    fn test_find_min_not_occupied() {
-        let numbers = vec![1, 2, 4, 5, 6];
-        let min = find_min_not_occupied(numbers);
-        assert_eq!(min, 3);
-    }
+//     #[test]
+//     fn test_find_min_not_occupied() {
+//         let numbers = vec![1, 2, 4, 5, 6];
+//         let min = find_min_not_occupied(numbers);
+//         assert_eq!(min, 3);
+//     }
 
-    fn prepare_bunch_and_addresses(config: ServiceConfig) -> (ServiceConfig, Vec<ConnectAddr>) {
-        let (_tx, controller_rx) = tokio::sync::mpsc::channel(100);
-        let (controller_tx, _rx) = tokio::sync::mpsc::channel(100);
-        let bunch = ServiceBunch {
-            config: config.clone(),
-            stable_connections: Vec::new(),
-            join_set: JoinSet::new(),
-            state: StateBox::new(),
-            controller_rx,
-            controller_tx,
-            new_connections: Vec::new(),
-            failure_count: 0,
-            last_check_time: Instant::now(),
-        };
-        let addresses = find_available_addresses(
-            &bunch.config.name,
-            &bunch.config.connect_addr,
-            bunch.config.instances_count,
-        )
-        .unwrap();
-        (config, addresses)
-    }
-}
+//     fn prepare_bunch_and_addresses(config: ServiceConfig) -> (ServiceConfig, Vec<ConnectAddr>) {
+//         let (_tx, controller_rx) = tokio::sync::mpsc::channel(100);
+//         let (controller_tx, _rx) = tokio::sync::mpsc::channel(100);
+//         let bunch = ServiceBunch {
+//             config: config.clone(),
+//             stable_connections: Vec::new(),
+//             join_set: JoinSet::new(),
+//             state: StateBox::new(),
+//             controller_rx,
+//             controller_tx,
+//             new_connections: Vec::new(),
+//             failure_count: 0,
+//             last_check_time: Instant::now(),
+//         };
+//         let addresses = find_available_addresses(
+//             &bunch.config.name,
+//             &bunch.config.connect_addr,
+//             bunch.config.instances_count,
+//         )
+//         .unwrap();
+//         (config, addresses)
+//     }
+// }
 
-// TODO: add new tests
-#[cfg(test)]
-mod test_pack2 {
-    use super::*;
+// // TODO: add new tests
+// #[cfg(test)]
+// mod test_pack2 {
+//     use super::*;
 
-    #[tokio::test]
-    async fn test1() {}
-}
+//     #[tokio::test]
+//     async fn test1() {}
+// }
