@@ -1,13 +1,13 @@
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use libc::__c_anonymous_ptrace_syscall_info_data;
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 
-use buzzoperator::bunch_controller::BunchController;
+use buzzoperator::bunch_controller::{BunchController, ControllerCommand};
 use buzzoperator::configuration;
 
 // TODO: add config file verification with -t flag
@@ -22,13 +22,13 @@ const SOCK_FILE: &'static str = "/tmp/buzzoperator.sock";
 #[command(propagate_version = true)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>,
+    command: Option<Command>,
     #[arg(long, short)]
     test_config: bool,
 
     /// These are for SystemD. Do not use these arguments!
     /// Use instead: systemctl <command> buzzoperator
-    #[arg(value_enum, hide = true)]
+    #[arg(value_enum, hide = false)]
     daemon_mode: Option<Mode>,
 }
 
@@ -38,8 +38,8 @@ enum Mode {
     ReloadDaemon,
 }
 
-#[derive(Subcommand)]
-enum Commands {
+#[derive(Debug, Subcommand, Serialize, Deserialize)]
+enum Command {
     /// Start service with name, specified in the config.
     Start(ServiceName),
     /// Stop service with name, specified in the config.
@@ -48,7 +48,7 @@ enum Commands {
     Restart(ServiceName),
 }
 
-#[derive(Args)]
+#[derive(Debug, Args, Serialize, Deserialize)]
 struct ServiceName {
     /// Name of the service.
     name: String,
@@ -112,20 +112,38 @@ async fn main() -> ExitCode {
         // Or send signals to daemon
     } else {
         if let Some(command) = cli.command {
-            // TODO: finish this
-            // match connect_to_sock() {
-            //     Ok(stream) => match request_reload(stream) {
-            //         Ok(response) => tracing::info!("Response from daemon: {}", response),
-            //         Err(e) => tracing::error!("Failed to reload: {}", e),
-            //     },
-            //     Err(e) => {
-            //         tracing::error!("Can't reload daemon, error: {}", e);
-            //         return ExitCode::FAILURE;
-            //     };
-            match command {
-                Commands::Start(name) => todo!(),
-                Commands::Stop(name) => todo!(),
-                Commands::Restart(name) => todo!(),
+            match connect_to_sock() {
+                Ok(mut stream) => {
+                    let serialized_command = match serde_json::to_vec(&command) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to serialize command: {:?}, error: {}",
+                                command,
+                                e
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                    if let Err(e) = stream.write(&serialized_command) {
+                        tracing::error!(
+                            "Failed to send {:?} command over unix socket, error: {}",
+                            command,
+                            e
+                        );
+                    }
+                    stream.flush().unwrap();
+                    let mut buffer = Vec::new();
+                    if let Err(e) = stream.read(&mut buffer) {
+                        tracing::error!("Failed to read message from unix socket: {}", e);
+                    }
+                    let str = String::from_utf8_lossy(&buffer);
+                    println!("{}", str);
+                }
+                Err(e) => {
+                    tracing::error!("Can't connect to socket file, error: {}", e);
+                    return ExitCode::FAILURE;
+                }
             }
         }
     }
@@ -133,14 +151,85 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-// TODO: Finish this
 async fn start_daemon(config: configuration::Configuration, listener: UnixListener) {
-    let mut controller = BunchController::new(config);
-    controller.run_and_wait().await;
+    let (mut controller, sender) = BunchController::new(config);
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+
+    loop {
+        tokio::select! {
+            _ = controller.run_and_wait() => {
+                    break;
+                }
+            message = listener.accept() => {
+                match message {
+                Ok((unix_stream, _addr)) => {
+                    exec_command(unix_stream, sender.clone()).await;
+                },
+                Err(e) => tracing::error!("Failed to get intput on unix stream: {}", e),
+                }
+            }
+
+        }
+    }
 
     if let Err(e) = remove_sock() {
         tracing::error!("Failed to remove socket file {}, error: {}", SOCK_FILE, e);
     }
+}
+
+async fn exec_command(
+    mut stream: tokio::net::UnixStream,
+    sender: tokio::sync::mpsc::Sender<ControllerCommand>,
+) {
+    let mut buffer = Vec::new();
+
+    // if let Err(e) = stream.read(&mut buffer).await {
+    //     tracing::error!("Failed to read message from unix socket: {}", e);
+    // }
+
+    let timeout = tokio::time::sleep(std::time::Duration::from_secs(1));
+
+    // Read from the socket until the timeout expires
+    tokio::select! {
+        result = stream.read_to_end(&mut buffer) => {
+            if let Err(e) = result {
+                tracing::error!("Failed to read message from unix socket: {}", e);
+            }
+        }
+        _ = timeout => {
+            // Exit from select! macro
+        }
+    }
+    tracing::info!("Read for 1 sec: {}", String::from_utf8_lossy(&buffer));
+
+    let command = match serde_json::from_slice::<Command>(&buffer) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to parse message from unix socket: {}", e);
+            return;
+        }
+    };
+
+    let controler_command = match command {
+        Command::Start(name) => ControllerCommand {
+            command: buzzoperator::bunch_controller::Commands::StartServices(vec![name.name]),
+            feedback: stream.into_std().unwrap(),
+        },
+        Command::Stop(name) => ControllerCommand {
+            command: buzzoperator::bunch_controller::Commands::StopServices(vec![name.name]),
+            feedback: stream.into_std().unwrap(),
+        },
+        Command::Restart(name) => ControllerCommand {
+            command: buzzoperator::bunch_controller::Commands::RestartServices(vec![name.name]),
+            feedback: stream.into_std().unwrap(),
+        },
+    };
+
+    match sender.send(controler_command).await {
+        Ok(_) => {}
+        Err(e) => tracing::error!("Failed to send message to daemon: {}", e),
+    };
+    tracing::info!("Command is done");
 }
 
 fn init_tracing_subscriber() {

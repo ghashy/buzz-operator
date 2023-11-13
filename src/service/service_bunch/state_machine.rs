@@ -48,7 +48,7 @@ impl StateBox {
         }
     }
 
-    fn next(self, event: Event) -> StateBox {
+    fn _next(self, event: Event) -> StateBox {
         match (&self, event) {
             // Transition to update state
             (StateBox(State::Running), Event::UpdateRequest) => StateBox(State::Updating),

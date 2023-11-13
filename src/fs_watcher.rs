@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 /// WARN: Sends only `create` notifications, all other skipped,
 /// but printed in logs.
 pub struct FileSystemWatcher {
-    watcher: RecommendedWatcher,
+    _watcher: RecommendedWatcher,
     pub receiver: mpsc::Receiver<Event>,
 }
 
@@ -36,7 +36,7 @@ impl FileSystemWatcher {
 
         // Create an instance of the custom Future
         FileSystemWatcher {
-            watcher,
+            _watcher: watcher,
             receiver: rx,
         }
     }
